@@ -974,10 +974,13 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         (unsigned long)(getTotalAirTime() / 1000), (unsigned long)(getReceiveAirTime() / 1000),
         (int)_mgr->getOutboundTotal(),
         (unsigned long)radio_driver.getPacketsRecv(), (unsigned long)radio_driver.getPacketsSent());
-  } else if (sender_timestamp == 0 && cliext::handleCommand(command, reply)) {
-    // Handled by a feature-gated extension command (start tcpota / eth / backhaul
-    // / log ...). Local-console only (sender_timestamp == 0) — same gate the old
-    // inline `start tcpota` used, keeping these off the over-the-air admin path.
+  } else if (cliext::handleCommand(command, reply)) {
+    // Feature-gated extension command (eth / backhaul / log / get|set mqtt.* /
+    // start tcpota). Reached from BOTH the local console (sender_timestamp == 0)
+    // and the over-the-air admin path: onPeerDataRecv only dispatches CLI text to
+    // handleCommand for clients that pass client->isAdmin(), so remote management
+    // (companion) can drive these too. cliext's own set/get fall through to
+    // CommonCLI for any key it doesn't own, so upstream `set <var>` still works.
   } else {
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }

@@ -7,7 +7,7 @@
 // vendored. The env adds `-I examples/simple_repeater` so the includes below
 // resolve. If upstream changes simple_repeater/main.cpp, re-sync this copy.
 //
-// Delta vs. upstream: WITH_BLE_CONSOLE -> CONSOLE macro + BleConsole begin/loop
+// Delta vs. upstream: WITH_BACKHAUL_PERIPHERAL -> CONSOLE macro + BleConsole begin/loop
 // + CLI routed through CONSOLE (see docs/remote-observer-backhaul.md §4).
 
 #include <Arduino.h>   // needed for PlatformIO
@@ -16,7 +16,7 @@
 #include "MyMesh.h"
 #include <helpers/console/CLIExtensions.h>   // feature-gated extension commands
 
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
   #include <helpers/nrf52/BleConsole.h>
   #define CONSOLE BleConsole   // CLI + packet logs mirrored on a BLE NUS peripheral
 #else
@@ -45,11 +45,13 @@ SimpleMeshTables tables;
     // Route the console CLI (which on the mast is the BLE NUS backhaul) through the
     // feature-gated extension commands before the upstream CommonCLI. simple_repeater's
     // MyMesh::handleCommand stays pristine; the mast gains backhaul/log/eth/tcpota here.
-    void handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
-      // sender_timestamp == 0 == local/backhaul console (the mast's CONSOLE is its
-      // BLE NUS). Keep extension commands off the over-the-air admin path, as the
-      // room_server role does.
-      if (sender_timestamp == 0 && cliext::handleCommand(command, reply)) return;
+    void handleCommand(uint32_t sender_timestamp, char* command, char* reply) override {
+      // Extension commands serve BOTH the local/backhaul console (sender_timestamp
+      // == 0, the mast's CONSOLE = BLE NUS) and the over-the-air admin path:
+      // onPeerDataRecv only routes CLI text here for clients that pass isAdmin(),
+      // so companion remote-management can run backhaul/log/get-set too. cliext's
+      // set/get fall through to upstream CommonCLI for keys it doesn't own.
+      if (cliext::handleCommand(command, reply)) return;
       MyMesh::handleCommand(sender_timestamp, command, reply);
     }
   protected:
@@ -147,6 +149,8 @@ void setup() {
 
   the_mesh.begin(fs);
 
+  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (log on|off)
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
 #endif
@@ -156,7 +160,7 @@ void setup() {
   the_mesh.sendSelfAdvertisement(16000, false);
 #endif
 
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
   BleConsole.begin();   // NUS console + dormant DFU service
 #endif
 
@@ -164,7 +168,7 @@ void setup() {
 }
 
 void loop() {
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
   BleConsole.loop();
 #endif
 
