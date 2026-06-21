@@ -2,20 +2,21 @@
 //
 // Shared by both RAK_4631_room_server_eth_gw (ethernet only) and
 // RAK_4631_room_server_eth_gw_blerelay (ethernet + relay) — additions are
-// #ifdef'd on WITH_RAK13800_ETHERNET / WITH_BLE_CENTRAL_RELAY. Kept here instead
+// #ifdef'd on WITH_RAK13800_ETHERNET / WITH_BACKHAUL_CENTRAL. Kept here instead
 // of editing the upstream example so `make rebase` never conflicts on it.
 // The WHOLE room-server role app is vendored here (main + MyMesh + UITask) — the
 // env compiles src/apps/room_server/ and excludes examples/simple_room_server/,
 // which stays 100% pristine. If upstream changes the example, re-sync these
 // copies — `make vendor-diff` (see docs/remote-observer-backhaul.md §5.1).
 //
-// Delta vs. upstream: WITH_RAK13800_ETHERNET -> EthConsole; WITH_BLE_CENTRAL_RELAY
+// Delta vs. upstream: WITH_RAK13800_ETHERNET -> EthConsole; WITH_BACKHAUL_CENTRAL
 // -> BleRelay begin/loop (see docs/remote-observer-backhaul.md §4.1).
 
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include <helpers/console/CLIExtensions.h>   // cliext::begin() — durable config store
 
 #ifdef WITH_RAK13800_ETHERNET
   #include <helpers/bridges/EthernetTcpConsole.h>
@@ -24,7 +25,7 @@
   #define CONSOLE Serial
 #endif
 
-#ifdef WITH_BLE_CENTRAL_RELAY
+#ifdef WITH_BACKHAUL_CENTRAL
   #include <helpers/bridges/BleNusRelay.h>   // relays the mast's BLE NUS to TCP :5001
 #endif
 
@@ -97,6 +98,8 @@ void setup() {
 
   the_mesh.begin(fs);
 
+  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (log on|off)
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
 #endif
@@ -110,7 +113,7 @@ void setup() {
   EthConsole.begin();
 #endif
 
-#ifdef WITH_BLE_CENTRAL_RELAY
+#ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.begin();   // BLE central → mast NUS, bridged to TCP :5001
 #endif
 
@@ -122,7 +125,7 @@ void loop() {
   EthConsole.loop();
 #endif
 
-#ifdef WITH_BLE_CENTRAL_RELAY
+#ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.loop();
 #endif
 

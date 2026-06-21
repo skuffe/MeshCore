@@ -1,4 +1,4 @@
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
 
 #include "BleConsole.h"
 

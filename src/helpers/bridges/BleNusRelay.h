@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef WITH_BLE_CENTRAL_RELAY
+#ifdef WITH_BACKHAUL_CENTRAL
 
 #include <Arduino.h>
 #include <bluefruit.h>

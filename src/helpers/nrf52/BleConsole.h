@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
 
 #include <Arduino.h>
 #include <bluefruit.h>
@@ -48,7 +48,7 @@ public:
 
   // Drop any connected central and re-advertise so a DFU client can take the
   // single peripheral slot. Fills reply with the BLE MAC. Called from
-  // NRF52Board::startOTAUpdate under WITH_BLE_CONSOLE.
+  // NRF52Board::startOTAUpdate under WITH_BACKHAUL_PERIPHERAL.
   void prepareForDfu(char* reply);
 
   size_t write(uint8_t c) override;

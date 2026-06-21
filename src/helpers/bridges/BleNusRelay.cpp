@@ -1,4 +1,4 @@
-#ifdef WITH_BLE_CENTRAL_RELAY
+#ifdef WITH_BACKHAUL_CENTRAL
 
 #include "BleNusRelay.h"
 #include <helpers/bridges/EthernetTcpConsole.h>   // gate BLE bringup on EthConsole.isReady()
