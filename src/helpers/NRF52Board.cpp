@@ -4,7 +4,7 @@
 #include <bluefruit.h>
 #include <nrf_soc.h>
 
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
   #include <helpers/nrf52/BleConsole.h>
 #endif
 
@@ -283,6 +283,21 @@ void NRF52Board::sleep(uint32_t secs) {
 
 // Temperature from NRF52 MCU
 float NRF52Board::getMCUTemperature() {
+  // When the SoftDevice (BLE) is enabled it OWNS the NRF_TEMP peripheral — it uses
+  // the sensor for its own radio calibration. Driving TEMP's task/event registers
+  // directly while the SoftDevice runs trips a protection fault that resets the BLE
+  // link (observed as the link LED blipping) and aborts whatever was running — e.g.
+  // a telemetry request handler, so the response never goes out and the companion
+  // times out. Stock non-BLE repeater builds have no SoftDevice, so the bare-metal
+  // path below is fine there; our BLE-backhaul variant must go through the SD API.
+  uint8_t sd_enabled = 0;
+  sd_softdevice_is_enabled(&sd_enabled);
+  if (sd_enabled) {
+    int32_t temp = 0;   // SoftDevice returns 0.25 *C units, same as NRF_TEMP->TEMP
+    if (sd_temp_get(&temp) == NRF_SUCCESS) return temp * 0.25f;
+    return NAN;
+  }
+
   NRF_TEMP->TASKS_START = 1; // Start temperature measurement
 
   long startTime = millis();  
@@ -321,7 +336,7 @@ bool NRF52Board::getBootloaderVersion(char* out, size_t max_len) {
 }
 
 bool NRF52Board::startOTAUpdate(const char *id, char reply[]) {
-#ifdef WITH_BLE_CONSOLE
+#ifdef WITH_BACKHAUL_PERIPHERAL
   // BleConsole already brought BLE up at boot (with bledfu registered). A second
   // Bluefruit.begin() below would fail (NRF_ERROR_INVALID_STATE), so hand off to
   // it: free the single peripheral slot and re-advertise for a DFU client.
