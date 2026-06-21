@@ -4,6 +4,10 @@
 #include <bluefruit.h>
 #include <nrf_soc.h>
 
+#ifdef WITH_BLE_CONSOLE
+  #include <helpers/nrf52/BleConsole.h>
+#endif
+
 static BLEDfu bledfu;
 
 static void connect_callback(uint16_t conn_handle) {
@@ -317,6 +321,17 @@ bool NRF52Board::getBootloaderVersion(char* out, size_t max_len) {
 }
 
 bool NRF52Board::startOTAUpdate(const char *id, char reply[]) {
+#ifdef WITH_BLE_CONSOLE
+  // BleConsole already brought BLE up at boot (with bledfu registered). A second
+  // Bluefruit.begin() below would fail (NRF_ERROR_INVALID_STATE), so hand off to
+  // it: free the single peripheral slot and re-advertise for a DFU client.
+  if (g_ble_console_up) {
+    (void)id;
+    BleConsole.prepareForDfu(reply);
+    return true;
+  }
+#endif
+
   // Config the peripheral connection with maximum bandwidth
   // more SRAM required by SoftDevice
   // Note: All config***() function must be called before begin()
