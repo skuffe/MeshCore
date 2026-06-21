@@ -5,11 +5,12 @@ namespace cliext {
 
 static const char*    CONFIG_PATH    = "/cliext_cfg";
 static const uint32_t CONFIG_MAGIC   = 0x43584C43;  // 'CLXC'
-// v2: appended Config::slots[MQTT_SLOTS] after the legacy mqtt_* block. The append-only
-// loader (read min(body_len, sizeof)) means a v1 file loads here with slots zeroed (then
-// migrated from the legacy fields), and a v2 file loads into a v1 build with the slots
-// tail simply ignored — no version gate needed, the bump is documentation.
-static const uint16_t CONFIG_VERSION = 2;
+// v4: appended NTP fields (ntp_enabled + ntp_server) after the message toggles. v3 added
+// the global message-type toggles; v2 added slots[MQTT_SLOTS] after the legacy mqtt_*
+// block (migrated on load). Same append-only rule throughout: the loader reads
+// min(body_len, sizeof), so an older file leaves the newer tail at its configReset
+// default and a newer file loses only its extra tail in an older build. Bump = docs.
+static const uint16_t CONFIG_VERSION = 4;
 
 // Fixed-size on-disk preamble. `body_len` records how many Config bytes were written
 // so a newer build (larger struct) knows how much of an older, shorter file is real.
@@ -26,6 +27,21 @@ void configReset() {
   memset(&_cfg, 0, sizeof(_cfg));
   _cfg.packet_dump = -1;   // unset → WITH_OBSERVER build seed wins at boot
   // all mqtt_*/slots left zero/empty == unset (no presets)
+  // Message-type defaults (agessaman/MQTTDefaults): status+packets+rx on, raw off,
+  // tx self-advert-only, 5-min status. Applied here so an older file (no toggle tail)
+  // inherits sane defaults rather than all-zero (which would silence every topic).
+  _cfg.msg_status = 1;
+  _cfg.msg_packets = 1;
+  _cfg.msg_raw = 0;
+  _cfg.msg_rx = 1;
+  _cfg.msg_tx = 2;
+  _cfg.status_interval_s = 300;
+  // NTP defaults ON — the node clock boots years off, which poisons every JSON/packet
+  // timestamp. The client opens/closes its UDP socket PER SYNC (the W5100S has only 4
+  // sockets), syncs at boot while sockets are free, then refreshes hourly; if no socket
+  // is free at refresh time it backs off and retries (never holds one, never wedges).
+  _cfg.ntp_enabled = 1;
+  // ntp_server left empty == use NTP_DEFAULT_SERVER fallback
 }
 
 Config& config() { return _cfg; }
@@ -93,6 +109,14 @@ void configBegin(FILESYSTEM* fs) {
     if (_cfg.mqtt_enabled > 1) _cfg.mqtt_enabled = 1;
     for (int i = 0; i < MQTT_SLOTS; i++) sanitiseSlot(_cfg.slots[i]);
     migrateLegacyToSlot0();
+    if (_cfg.msg_status  > 1) _cfg.msg_status  = 1;
+    if (_cfg.msg_packets > 1) _cfg.msg_packets = 1;
+    if (_cfg.msg_raw     > 1) _cfg.msg_raw     = 1;
+    if (_cfg.msg_rx      > 1) _cfg.msg_rx      = 1;
+    if (_cfg.msg_tx      > 2) _cfg.msg_tx      = 2;
+    if (_cfg.status_interval_s < 10) _cfg.status_interval_s = 10;   // floor; 0 would hammer
+    if (_cfg.ntp_enabled > 1) _cfg.ntp_enabled = 1;
+    _cfg.ntp_server[sizeof(_cfg.ntp_server) - 1] = 0;
   }
   f.close();
 }

@@ -60,6 +60,23 @@ struct Config {
   // Multi-broker slots, APPENDED after the legacy block (append-only contract).
   // slots[0] supersedes the legacy fields above; slots[1..] are net-new.
   MqttSlot slots[MQTT_SLOTS];
+
+  // Global message-type toggles (Phase B1 M2), APPENDED after slots[] — apply across
+  // all brokers. Defaults (set in configReset, so an older file without this tail keeps
+  // them) mirror agessaman/MQTTDefaults: status+packets+rx on, raw OFF, tx self-advert
+  // only, 5-min status interval. `tx`: 0=off, 1=all TX, 2=self-advert only.
+  uint8_t  msg_status;        // publish periodic + on-connect status JSON
+  uint8_t  msg_packets;       // publish per-packet JSON to <base>/packets
+  uint8_t  msg_raw;           // publish raw-radio JSON to <base>/raw (heavy — default off)
+  uint8_t  msg_rx;            // include RX packets
+  uint8_t  msg_tx;            // 0=off 1=all 2=advert-only
+  uint16_t status_interval_s; // seconds between periodic status publishes
+
+  // NTP time sync (M2), APPENDED. The network node's clock drifts/wrong-year, which would
+  // poison every JSON timestamp — a simple NTP client keeps the mesh RTC in UTC. Default
+  // server is the public pool (not a broker preset); empty falls back to NTP_DEFAULT_SERVER.
+  uint8_t  ntp_enabled;       // default on (set in configReset)
+  char     ntp_server[64];    // empty → NTP_DEFAULT_SERVER ("pool.ntp.org")
 };
 
 // Live broker slot i (0..MQTT_SLOTS-1). Runtime access goes through here, never the

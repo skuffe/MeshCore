@@ -31,6 +31,7 @@
 
 #ifdef WITH_NET_BRIDGE
   #include <helpers/bridges/MqttPublisher.h>   // native on-node MQTT publish (Phase B1)
+  #include <helpers/bridges/NtpClient.h>       // keep the mesh RTC in UTC for JSON timestamps
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -122,7 +123,14 @@ void setup() {
 #endif
 
 #ifdef WITH_NET_BRIDGE
+  // Identity/clock context for the analyzer-spec JSON (origin_id = 64-hex pubkey).
+  static char obs_pubkey[2 * PUB_KEY_SIZE + 1];
+  for (int i = 0; i < PUB_KEY_SIZE; i++) sprintf(obs_pubkey + i * 2, "%02X", the_mesh.self_id.pub_key[i]);
+  MqttPub.setContext(the_mesh.getRTCClock(), the_mesh.getNodeName(), obs_pubkey,
+                     "RAK4631", FIRMWARE_VERSION, "SX1262",
+                     "wismesh-observer/" FIRMWARE_VERSION);
   MqttPub.begin();   // inert unless mqtt.enabled + provisioned (see `set mqtt.*`)
+  Ntp.begin(the_mesh.getRTCClock());   // sync UTC once ethernet is up, then hourly
 #endif
 
   board.onBootComplete();
@@ -139,6 +147,7 @@ void loop() {
 
 #ifdef WITH_NET_BRIDGE
   MqttPub.loop();   // MQTT keepalive + throttled reconnect
+  Ntp.loop();       // periodic UTC time sync
 #endif
 
   int len = strlen(command);

@@ -233,12 +233,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   }
 #endif
 #ifdef WITH_NET_BRIDGE
-  if (cliext::g_packet_dump_enabled) {
-    MqttPub.print(getLogDateTime());
-    MqttPub.print(" RAW: ");
-    mesh::Utils::printHex(MqttPub, raw, len);
-    MqttPub.println();
-  }
+  // Stage the raw radio bytes (for the imminent logRx packet JSON) and, if enabled,
+  // publish the <base>/raw message. Same `log on|off` gate as the console feed.
+  if (cliext::g_packet_dump_enabled) MqttPub.onRawRx(raw, len, snr, rssi);
 #endif
 }
 
@@ -269,8 +266,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
     meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
 #endif
 #ifdef WITH_NET_BRIDGE
-  if (cliext::g_packet_dump_enabled)
-    meshconsole::logRx(MqttPub, getLogDateTime(), *_radio, pkt, len, score);
+  if (cliext::g_packet_dump_enabled) MqttPub.onPacketRx(pkt, score);
 #endif
 }
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
@@ -295,8 +291,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
     meshconsole::logTx(PACKET_LOG_STREAM, getLogDateTime(), pkt, len);
 #endif
 #ifdef WITH_NET_BRIDGE
-  if (cliext::g_packet_dump_enabled)
-    meshconsole::logTx(MqttPub, getLogDateTime(), pkt, len);
+  if (cliext::g_packet_dump_enabled) MqttPub.onPacketTx(pkt);
 #endif
 }
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {

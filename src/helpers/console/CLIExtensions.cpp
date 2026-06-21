@@ -21,6 +21,7 @@
 #endif
 #ifdef WITH_NET_BRIDGE
   #include <helpers/bridges/MqttPublisher.h>   // slot conn/breaker state + `mqtt reset`
+  #include <helpers/bridges/NtpClient.h>       // `get ntp` sync state
 #endif
 
 namespace cliext {
@@ -171,6 +172,47 @@ bool handleCommand(const char* command, char* reply) {
              s.user[0] ? s.user : "-", s.pass[0] ? "set" : "unset");
     return true;
   }
+  // `get mqtt msg` → global message-type toggles (apply across all brokers).
+  if (strcmp(command, "get mqtt msg") == 0) {
+    Config& g = config();
+    const char* tx = g.msg_tx == 0 ? "off" : g.msg_tx == 1 ? "all" : "advert";
+    snprintf(reply, CLIEXT_REPLY_CAP,
+             "msg: status=%s packets=%s raw=%s rx=%s tx=%s interval=%us",
+             g.msg_status ? "on" : "off", g.msg_packets ? "on" : "off",
+             g.msg_raw ? "on" : "off", g.msg_rx ? "on" : "off", tx,
+             (unsigned)g.status_interval_s);
+    return true;
+  }
+  // NTP time-sync config + state (M2). `set ntp.server <host>` / `set ntp.enabled on|off`,
+  // `get ntp`. Kept on the bridge node (WITH_NET_BRIDGE) — it owns the IP path.
+  if (strcmp(command, "get ntp") == 0) {
+    Config& g = config();
+    snprintf(reply, CLIEXT_REPLY_CAP, "ntp: en=%s server=%s synced=%s stage=%s",
+             g.ntp_enabled ? "on" : "off",
+             g.ntp_server[0] ? g.ntp_server : "pool.ntp.org(default)",
+             Ntp.synced() ? "yes" : "no", Ntp.stage());
+    return true;
+  }
+  if (strncmp(command, "set ntp.", 8) == 0) {
+    const char* args = command + 4;          // "ntp.<field> <value>"
+    const char* sp = strchr(args, ' ');
+    if (!sp || sp == args) { strcpy(reply, "set: usage 'set ntp.<server|enabled> <value>'"); return true; }
+    char key[24];
+    size_t klen = (size_t)(sp - args);
+    if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+    memcpy(key, args, klen); key[klen] = 0;
+    const char* val = sp + 1;
+    while (*val == ' ') val++;
+
+    Config& g = config();
+    if (strcmp(key, "ntp.server") == 0)       setStr(g.ntp_server, sizeof(g.ntp_server), val);
+    else if (strcmp(key, "ntp.enabled") == 0) { if (!parseOnOff(val, &g.ntp_enabled)) { strcpy(reply, "set: ntp.enabled on|off"); return true; } }
+    else { snprintf(reply, CLIEXT_REPLY_CAP, "set: unknown ntp key '%s'", key); return true; }
+
+    if (configSave()) snprintf(reply, CLIEXT_REPLY_CAP, "ok: %s (reboot to apply server)", key);
+    else              strcpy(reply, "set: save failed (fs)");
+    return true;
+  }
   // `mqtt reset [N]` → clear a tripped circuit breaker and re-arm reconnect (all, or one).
   if (strcmp(command, "mqtt reset") == 0) {
     MqttPub.resetSlot(-1);
@@ -204,9 +246,40 @@ bool handleCommand(const char* command, char* reply) {
     // Parse the slot index out of the key prefix: "mqtt." or "mqtt1." → 0, "mqtt2." → 1...
     const char* p = key + 4;     // past "mqtt"
     int idx = 0;
-    if (*p >= '1' && *p <= '9') { idx = *p - '1'; p++; }
+    bool had_digit = false;
+    if (*p >= '1' && *p <= '9') { idx = *p - '1'; p++; had_digit = true; }
     if (*p != '.') { snprintf(reply, CLIEXT_REPLY_CAP, "set: bad mqtt key '%s'", key); return true; }
     const char* field = p + 1;
+
+    // Bare `set mqtt.<toggle>` (no slot digit) sets a GLOBAL message-type toggle. These
+    // names are disjoint from the slot fields below, so they never shadow `set mqtt.host`
+    // etc (which alias slot 1). Indexed `set mqtt<N>.<toggle>` falls through to the slot.
+    if (!had_digit) {
+      Config& g = config();
+      bool gok = true, ghandled = true;
+      if      (strcmp(field, "status")  == 0) gok = parseOnOff(val, &g.msg_status);
+      else if (strcmp(field, "packets") == 0) gok = parseOnOff(val, &g.msg_packets);
+      else if (strcmp(field, "raw")     == 0) gok = parseOnOff(val, &g.msg_raw);
+      else if (strcmp(field, "rx")      == 0) gok = parseOnOff(val, &g.msg_rx);
+      else if (strcmp(field, "tx")      == 0) {
+        if      (strcmp(val, "off") == 0 || strcmp(val, "0") == 0)    g.msg_tx = 0;
+        else if (strcmp(val, "all") == 0 || strcmp(val, "1") == 0)    g.msg_tx = 1;
+        else if (strcmp(val, "advert") == 0 || strcmp(val, "2") == 0) g.msg_tx = 2;
+        else gok = false;
+      }
+      else if (strcmp(field, "interval") == 0) { int iv = atoi(val); g.status_interval_s = (uint16_t)(iv < 10 ? 10 : iv); }
+      else ghandled = false;
+
+      if (ghandled) {
+        if (!gok) { snprintf(reply, CLIEXT_REPLY_CAP, "set: bad value for mqtt.%s", field); return true; }
+        if (!configSave()) { strcpy(reply, "set: save failed (fs)"); return true; }
+        MqttPub.reconfigure();
+        snprintf(reply, CLIEXT_REPLY_CAP, "ok: mqtt.%s", field);
+        return true;
+      }
+      // not a global toggle → fall through to slot-1 field handling
+    }
+
     if (idx >= mqttSlotCount()) { snprintf(reply, CLIEXT_REPLY_CAP, "set: only %d slots", mqttSlotCount()); return true; }
 
     MqttSlot& s = mqttSlot(idx);
