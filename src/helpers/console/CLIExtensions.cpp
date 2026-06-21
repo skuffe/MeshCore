@@ -19,6 +19,9 @@
 #ifdef WITH_BACKHAUL_PERIPHERAL
   #include <helpers/nrf52/BleConsole.h>
 #endif
+#ifdef WITH_NET_BRIDGE
+  #include <helpers/bridges/MqttPublisher.h>   // slot conn/breaker state + `mqtt reset`
+#endif
 
 namespace cliext {
 
@@ -130,32 +133,64 @@ bool handleCommand(const char* command, char* reply) {
   }
 #endif
 
-  // Durable config get/set for our own namespace. Gated on WITH_NET_BRIDGE: MQTT only
-  // makes sense on a node that bridges the observer feed to a network (the relay
-  // gateway, Sortsnak). The mast has no IP transport, so exposing mqtt config there is
-  // just dead provisioning. The store struct stays build-agnostic; only the commands
-  // gate. CRITICAL: upstream CommonCLI owns the generic `get <var>` / `set <var> <val>`
-  // over the same admin path — so we ONLY claim keys under `mqtt.` (and the exact `get
-  // mqtt` dump) and return false for everything else, letting CommonCLI handle its own
-  // config. Never claim a bare `set `/`get ` or upstream breaks.
+  // Durable MULTI-BROKER config + control for our own namespace. Gated on WITH_NET_BRIDGE:
+  // MQTT only makes sense on a node that bridges the observer feed to a network (the relay
+  // gateway, Sortsnak). The mast has no IP transport, so exposing mqtt config there is just
+  // dead provisioning. CRITICAL: upstream CommonCLI owns the generic `get <var>` / `set
+  // <var> <val>` over the same admin path — so we ONLY claim keys under `mqtt`/`mqtt<N>.`
+  // (and the exact `get mqtt[N]` / `mqtt reset` verbs) and return false otherwise, letting
+  // CommonCLI handle its own config. Never claim a bare `set `/`get ` or upstream breaks.
 #ifdef WITH_NET_BRIDGE
+  // `get mqtt`  → one-line summary across all slots (conn/breaker state + queue depth).
   if (strcmp(command, "get mqtt") == 0) {
-    Config& c = config();
-    snprintf(reply, CLIEXT_REPLY_CAP,
-             "mqtt: en=%s host=%s port=%u user=%s topic=%s tls=%s pass=%s",
-             c.mqtt_enabled ? "on" : "off",
-             c.mqtt_host[0] ? c.mqtt_host : "-", (unsigned)c.mqtt_port,
-             c.mqtt_user[0] ? c.mqtt_user : "-",
-             c.mqtt_topic[0] ? c.mqtt_topic : "-",
-             c.mqtt_tls ? "on" : "off",
-             c.mqtt_pass[0] ? "set" : "unset");
+    int n = snprintf(reply, CLIEXT_REPLY_CAP, "mqtt: q=%d", MqttPub.queueDepth());
+    for (int i = 0; i < mqttSlotCount() && n < CLIEXT_REPLY_CAP; i++) {
+      const MqttSlot& s = mqttSlot(i);
+      const char* st = !s.enabled ? "off"
+                     : MqttPub.slotConnected(i) ? "up"
+                     : MqttPub.slotTripped(i)   ? "trip"
+                     : "down";
+      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, " %d:%s", i + 1, st);
+    }
     return true;
   }
-  if (strncmp(command, "set mqtt.", 9) == 0) {
-    const char* args = command + 4;          // points at "mqtt.<field> <value>"
+  // `get mqtt<N>` → full detail for one slot (1-based). Bounded to the reply cap.
+  if (strncmp(command, "get mqtt", 8) == 0 && command[8] >= '1' && command[8] <= '9' && command[9] == 0) {
+    int idx = command[8] - '1';
+    if (idx >= mqttSlotCount()) { snprintf(reply, CLIEXT_REPLY_CAP, "mqtt: only %d slots", mqttSlotCount()); return true; }
+    const MqttSlot& s = mqttSlot(idx);
+    const char* conn = !s.enabled ? "off"
+                     : MqttPub.slotConnected(idx) ? "up"
+                     : MqttPub.slotTripped(idx)   ? "trip"
+                     : "down";
+    snprintf(reply, CLIEXT_REPLY_CAP,
+             "mqtt%d en=%s conn=%s host=%s:%u topic=%s tls=%s user=%s pass=%s",
+             idx + 1, s.enabled ? "on" : "off", conn,
+             s.host[0] ? s.host : "-", (unsigned)s.port,
+             s.topic[0] ? s.topic : "-", s.tls ? "on" : "off",
+             s.user[0] ? s.user : "-", s.pass[0] ? "set" : "unset");
+    return true;
+  }
+  // `mqtt reset [N]` → clear a tripped circuit breaker and re-arm reconnect (all, or one).
+  if (strcmp(command, "mqtt reset") == 0) {
+    MqttPub.resetSlot(-1);
+    strcpy(reply, "mqtt: all slots re-armed");
+    return true;
+  }
+  if (strncmp(command, "mqtt reset ", 11) == 0) {
+    int idx = atoi(command + 11) - 1;
+    if (idx < 0 || idx >= mqttSlotCount()) { snprintf(reply, CLIEXT_REPLY_CAP, "mqtt: bad slot (1..%d)", mqttSlotCount()); return true; }
+    MqttPub.resetSlot(idx);
+    snprintf(reply, CLIEXT_REPLY_CAP, "mqtt%d: re-armed", idx + 1);
+    return true;
+  }
+  // `set mqtt[N].<field> <value>` — N=1..MQTT_SLOTS; bare `mqtt.` aliases slot 1.
+  if (strncmp(command, "set mqtt", 8) == 0 &&
+      (command[8] == '.' || (command[8] >= '1' && command[8] <= '9'))) {
+    const char* args = command + 4;          // "mqtt<N>.<field> <value>" | "mqtt.<field> ..."
     const char* sp = strchr(args, ' ');
     if (!sp || sp == args) {
-      strcpy(reply, "set: usage 'set mqtt.<field> <value>'");
+      strcpy(reply, "set: usage 'set mqtt[N].<field> <value>'");
       return true;
     }
     char key[24];
@@ -166,20 +201,30 @@ bool handleCommand(const char* command, char* reply) {
     const char* val = sp + 1;
     while (*val == ' ') val++;   // skip extra separators before the value
 
-    Config& c = config();
-    bool ok = true;
-    if (strcmp(key, "mqtt.host") == 0)       setStr(c.mqtt_host,  sizeof(c.mqtt_host),  val);
-    else if (strcmp(key, "mqtt.user") == 0)  setStr(c.mqtt_user,  sizeof(c.mqtt_user),  val);
-    else if (strcmp(key, "mqtt.pass") == 0)  setStr(c.mqtt_pass,  sizeof(c.mqtt_pass),  val);
-    else if (strcmp(key, "mqtt.topic") == 0) setStr(c.mqtt_topic, sizeof(c.mqtt_topic), val);
-    else if (strcmp(key, "mqtt.port") == 0)  c.mqtt_port = (uint16_t)atoi(val);
-    else if (strcmp(key, "mqtt.tls") == 0)     ok = parseOnOff(val, &c.mqtt_tls);
-    else if (strcmp(key, "mqtt.enabled") == 0) ok = parseOnOff(val, &c.mqtt_enabled);
-    else { snprintf(reply, CLIEXT_REPLY_CAP, "set: unknown mqtt key '%s'", key); return true; }
+    // Parse the slot index out of the key prefix: "mqtt." or "mqtt1." → 0, "mqtt2." → 1...
+    const char* p = key + 4;     // past "mqtt"
+    int idx = 0;
+    if (*p >= '1' && *p <= '9') { idx = *p - '1'; p++; }
+    if (*p != '.') { snprintf(reply, CLIEXT_REPLY_CAP, "set: bad mqtt key '%s'", key); return true; }
+    const char* field = p + 1;
+    if (idx >= mqttSlotCount()) { snprintf(reply, CLIEXT_REPLY_CAP, "set: only %d slots", mqttSlotCount()); return true; }
 
-    if (!ok) { snprintf(reply, CLIEXT_REPLY_CAP, "set: bad value for %s (on|off)", key); return true; }
-    if (configSave()) snprintf(reply, CLIEXT_REPLY_CAP, "ok: %s", key);
-    else              strcpy(reply, "set: save failed (fs)");
+    MqttSlot& s = mqttSlot(idx);
+    bool ok = true;
+    if (strcmp(field, "host") == 0)       setStr(s.host,  sizeof(s.host),  val);
+    else if (strcmp(field, "user") == 0)  setStr(s.user,  sizeof(s.user),  val);
+    else if (strcmp(field, "pass") == 0)  setStr(s.pass,  sizeof(s.pass),  val);
+    else if (strcmp(field, "topic") == 0) setStr(s.topic, sizeof(s.topic), val);
+    else if (strcmp(field, "port") == 0)  s.port = (uint16_t)atoi(val);
+    else if (strcmp(field, "tls") == 0)     ok = parseOnOff(val, &s.tls);
+    else if (strcmp(field, "enabled") == 0) ok = parseOnOff(val, &s.enabled);
+    else { snprintf(reply, CLIEXT_REPLY_CAP, "set: unknown mqtt field '%s'", field); return true; }
+
+    if (!ok) { snprintf(reply, CLIEXT_REPLY_CAP, "set: bad value for %s (on|off)", field); return true; }
+    if (!configSave()) { strcpy(reply, "set: save failed (fs)"); return true; }
+    // Re-apply config to the live publisher so edits take effect without a reboot.
+    MqttPub.reconfigure();
+    snprintf(reply, CLIEXT_REPLY_CAP, "ok: mqtt%d.%s", idx + 1, field);
     return true;
   }
 #endif  // WITH_NET_BRIDGE

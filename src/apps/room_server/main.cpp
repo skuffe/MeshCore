@@ -29,6 +29,10 @@
   #include <helpers/bridges/BleNusRelay.h>   // relays the mast's BLE NUS to TCP :5001
 #endif
 
+#ifdef WITH_NET_BRIDGE
+  #include <helpers/bridges/MqttPublisher.h>   // native on-node MQTT publish (Phase B1)
+#endif
+
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
@@ -117,6 +121,10 @@ void setup() {
   BleRelay.begin();   // BLE central → mast NUS, bridged to TCP :5001
 #endif
 
+#ifdef WITH_NET_BRIDGE
+  MqttPub.begin();   // inert unless mqtt.enabled + provisioned (see `set mqtt.*`)
+#endif
+
   board.onBootComplete();
 }
 
@@ -127,6 +135,10 @@ void loop() {
 
 #ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.loop();
+#endif
+
+#ifdef WITH_NET_BRIDGE
+  MqttPub.loop();   // MQTT keepalive + throttled reconnect
 #endif
 
   int len = strlen(command);

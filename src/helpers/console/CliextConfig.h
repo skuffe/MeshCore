@@ -18,6 +18,25 @@
 // reset / FS format wipes it — acceptable, same contract as node identity.
 namespace cliext {
 
+// Number of independent MQTT broker targets the node can publish to in parallel
+// (Phase B1). Each costs one W5100S socket; budget against EthConsole + BleRelay
+// (~4 sockets) within the chip's 8. Override per-env via `-D MQTT_SLOTS=N`.
+#ifndef MQTT_SLOTS
+#define MQTT_SLOTS 3
+#endif
+
+// One MQTT broker target. All empty/zero == "unset": NO presets ship in firmware
+// (deliberate operator requirement). Provisioned via `set mqtt<N>.<field>`.
+struct MqttSlot {
+  char     host[64];
+  uint16_t port;
+  char     user[32];
+  char     pass[64];
+  char     topic[80];      // base topic; the publisher appends /raw, /status, ...
+  uint8_t  tls;            // 0/1 — secure transport (8883); off until B1 TLS lands
+  uint8_t  enabled;        // 0/1 — per-slot publish enable
+};
+
 struct Config {
   // Runtime packet-observation toggle (`log on|off`), made durable. Tri-state:
   //   -1 = unset  → fall back to the WITH_OBSERVER build seed at boot
@@ -25,17 +44,28 @@ struct Config {
   //    1 = on     → last `log on`
   int8_t   packet_dump;
 
-  // Native MQTT publish (Phase B1). Defaults are empty/zero == "unset": NO broker
-  // presets ship in firmware (deliberate operator requirement). These can be
-  // pre-provisioned via `set mqtt.*` before the B1 publisher block lands.
+  // LEGACY single-broker fields (B1 pre-provisioning, pre-multi-slot). Retained at
+  // this offset for the on-disk cross-load contract — do NOT remove or reorder. New
+  // firmware MIGRATES these into slots[0] at load (configBegin) and then sources all
+  // runtime access from slots[]; these stay only so an older build can still read its
+  // own broker config out of a file this build wrote.
   char     mqtt_host[64];
   uint16_t mqtt_port;
   char     mqtt_user[32];
   char     mqtt_pass[64];
   char     mqtt_topic[80];
-  uint8_t  mqtt_tls;       // 0/1 — secure transport (8883); off until B1 TLS lands
-  uint8_t  mqtt_enabled;   // 0/1 — master enable for the on-node publisher
+  uint8_t  mqtt_tls;
+  uint8_t  mqtt_enabled;
+
+  // Multi-broker slots, APPENDED after the legacy block (append-only contract).
+  // slots[0] supersedes the legacy fields above; slots[1..] are net-new.
+  MqttSlot slots[MQTT_SLOTS];
 };
+
+// Live broker slot i (0..MQTT_SLOTS-1). Runtime access goes through here, never the
+// legacy mqtt_* fields (which are migration-source only).
+MqttSlot& mqttSlot(int i);
+inline int mqttSlotCount() { return MQTT_SLOTS; }
 
 // Reset the in-RAM config to defaults ("unset" everywhere). Called by configBegin
 // before a load; also the post-condition when no config file exists yet.

@@ -5,7 +5,11 @@ namespace cliext {
 
 static const char*    CONFIG_PATH    = "/cliext_cfg";
 static const uint32_t CONFIG_MAGIC   = 0x43584C43;  // 'CLXC'
-static const uint16_t CONFIG_VERSION = 1;
+// v2: appended Config::slots[MQTT_SLOTS] after the legacy mqtt_* block. The append-only
+// loader (read min(body_len, sizeof)) means a v1 file loads here with slots zeroed (then
+// migrated from the legacy fields), and a v2 file loads into a v1 build with the slots
+// tail simply ignored — no version gate needed, the bump is documentation.
+static const uint16_t CONFIG_VERSION = 2;
 
 // Fixed-size on-disk preamble. `body_len` records how many Config bytes were written
 // so a newer build (larger struct) knows how much of an older, shorter file is real.
@@ -21,10 +25,42 @@ static Config      _cfg;
 void configReset() {
   memset(&_cfg, 0, sizeof(_cfg));
   _cfg.packet_dump = -1;   // unset → WITH_OBSERVER build seed wins at boot
-  // all mqtt_* left zero/empty == unset (no presets)
+  // all mqtt_*/slots left zero/empty == unset (no presets)
 }
 
 Config& config() { return _cfg; }
+
+MqttSlot& mqttSlot(int i) {
+  if (i < 0) i = 0;
+  if (i >= MQTT_SLOTS) i = MQTT_SLOTS - 1;
+  return _cfg.slots[i];
+}
+
+// One-time migration of the pre-multi-slot legacy mqtt_* fields into slots[0]. Runs at
+// load when slots[0] is still empty but a legacy broker was provisioned — so a node that
+// had `set mqtt.host ...` under old firmware keeps its broker after this upgrade.
+static void migrateLegacyToSlot0() {
+  if (_cfg.slots[0].host[0] == 0 && _cfg.mqtt_host[0] != 0) {
+    MqttSlot& s = _cfg.slots[0];
+    strncpy(s.host,  _cfg.mqtt_host,  sizeof(s.host) - 1);
+    strncpy(s.user,  _cfg.mqtt_user,  sizeof(s.user) - 1);
+    strncpy(s.pass,  _cfg.mqtt_pass,  sizeof(s.pass) - 1);
+    strncpy(s.topic, _cfg.mqtt_topic, sizeof(s.topic) - 1);
+    s.port    = _cfg.mqtt_port;
+    s.tls     = _cfg.mqtt_tls;
+    s.enabled = _cfg.mqtt_enabled;
+  }
+}
+
+// Force NUL-termination + bound the on/off bytes of one slot after a raw disk read.
+static void sanitiseSlot(MqttSlot& s) {
+  s.host[sizeof(s.host) - 1]   = 0;
+  s.user[sizeof(s.user) - 1]   = 0;
+  s.pass[sizeof(s.pass) - 1]   = 0;
+  s.topic[sizeof(s.topic) - 1] = 0;
+  if (s.tls > 1)     s.tls = 1;
+  if (s.enabled > 1) s.enabled = 1;
+}
 
 void configBegin(FILESYSTEM* fs) {
   _fs = fs;
@@ -55,6 +91,8 @@ void configBegin(FILESYSTEM* fs) {
     _cfg.mqtt_topic[sizeof(_cfg.mqtt_topic) - 1] = 0;
     if (_cfg.mqtt_tls > 1)     _cfg.mqtt_tls = 1;
     if (_cfg.mqtt_enabled > 1) _cfg.mqtt_enabled = 1;
+    for (int i = 0; i < MQTT_SLOTS; i++) sanitiseSlot(_cfg.slots[i]);
+    migrateLegacyToSlot0();
   }
   f.close();
 }

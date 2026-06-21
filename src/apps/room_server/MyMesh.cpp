@@ -18,6 +18,12 @@
 // Feature-gated CLI extension commands (start tcpota / eth / backhaul / log ...).
 #include <helpers/console/CLIExtensions.h>
 
+// Native on-node MQTT publisher (Phase B1). Tees the same packet-feed lines to the
+// broker; a line-buffering Print sink fed by the very meshconsole:: formatters below.
+#ifdef WITH_NET_BRIDGE
+  #include <helpers/bridges/MqttPublisher.h>
+#endif
+
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
 #define SYNC_PUSH_INTERVAL          1200
@@ -226,6 +232,14 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
     PACKET_LOG_STREAM.println();
   }
 #endif
+#ifdef WITH_NET_BRIDGE
+  if (cliext::g_packet_dump_enabled) {
+    MqttPub.print(getLogDateTime());
+    MqttPub.print(" RAW: ");
+    mesh::Utils::printHex(MqttPub, raw, len);
+    MqttPub.println();
+  }
+#endif
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
@@ -254,6 +268,10 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   if (cliext::g_packet_dump_enabled)
     meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
 #endif
+#ifdef WITH_NET_BRIDGE
+  if (cliext::g_packet_dump_enabled)
+    meshconsole::logRx(MqttPub, getLogDateTime(), *_radio, pkt, len, score);
+#endif
 }
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
   if (_logging) {
@@ -275,6 +293,10 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef PACKET_LOG_STREAM
   if (cliext::g_packet_dump_enabled)
     meshconsole::logTx(PACKET_LOG_STREAM, getLogDateTime(), pkt, len);
+#endif
+#ifdef WITH_NET_BRIDGE
+  if (cliext::g_packet_dump_enabled)
+    meshconsole::logTx(MqttPub, getLogDateTime(), pkt, len);
 #endif
 }
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
