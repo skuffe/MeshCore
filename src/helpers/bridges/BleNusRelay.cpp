@@ -28,7 +28,11 @@ void BleNusRelay::startBle() {
   Bluefruit.setName("MeshCore-Relay");
   Serial.println("BleRelay: Bluefruit up");
 
-  _clientUart = new BLEClientUart();  // heap-alloc now (see header) — never at static-init
+  // Generous RX FIFO (default is only 256 B). The notify callback drops bytes when the
+  // FIFO is full, and we only drain it once per loop() pass — so a large burst from the
+  // peripheral (e.g. a ~2.5 KB `node <edge> help` dump) overflows the default and clips
+  // the tail. 4 KB comfortably bridges the gap between drains for any single console reply.
+  _clientUart = new BLEClientUart(BLE_RELAY_RX_FIFO);  // heap-alloc now (see header) — never at static-init
   _clientUart->begin();
 
   Bluefruit.Central.setConnectCallback(onConnect);

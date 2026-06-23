@@ -114,8 +114,9 @@ void setup() {
 
   the_mesh.begin(fs);
 
-  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (log on|off)
+  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (feed on|off)
   cliext::setLocalExec(centralLocalExec);   // `node <self> <cmd>` runs locally (uniform addressing)
+  cliext::setConsole(&CONSOLE);             // `help` streams its table to :5000 (EthConsole)
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);

@@ -22,6 +22,13 @@ namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch â†
   #define BLE_RELAY_TARGET_NAME "MeshCore-RPT"
 #endif
 
+// RX FIFO depth (bytes) for the peripheral's NUS stream. Larger than the 256 B default so
+// a big single console reply (a relayed `node <edge> help` dump is ~2.5 KB) doesn't
+// overflow between the central's once-per-loop drains. -D BLE_RELAY_RX_FIFO to override.
+#ifndef BLE_RELAY_RX_FIFO
+  #define BLE_RELAY_RX_FIFO 4096
+#endif
+
 // BLE central that connects to a remote MeshCore node's NUS console peripheral
 // (e.g. the mast repeater running BleConsole). The remote's observations arrive as
 // structured backhaul frames and are republished to MQTT under its observer identity;

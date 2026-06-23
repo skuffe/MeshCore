@@ -25,9 +25,22 @@ void begin(FILESYSTEM* fs);
 // if no extension matched, so the caller continues to CommonCLI.
 bool handleCommand(const char* command, char* reply);
 
-// Service deferred extension actions (currently the `start tcpota` reboot). Cheap;
+// Service deferred extension actions (currently the `start dfu` reboot). Cheap;
 // call once per main loop from every app that includes this module.
 void loop();
+
+// Bind the active console stream so the multi-line `help` command can stream its table
+// past the 160-byte reply cap. Each app passes its CONSOLE (EthConsole on the central's
+// :5000, BleConsole/Serial on the mast). For `node <edge> help`, the edge streams to its
+// NUS and the central forwards that non-frame text to :5000. Call once at boot.
+void setConsole(Stream* s);
+
+// Native-DFU hook for `start dfu` on a node whose DFU isn't the ethernet TCP path — the
+// BLE-bootloader edge. The role main registers a handler that triggers its bootloader BLE
+// DFU (upstream `start ota` → startOTAUpdate()). The central's ethernet DFU is handled
+// internally and needs no handler. Without this hook, `start dfu` reports "handler unset".
+typedef void (*DfuFn)(char* reply, size_t cap);
+void setDfuHandler(DfuFn fn);
 
 // Local-exec hook for uniform node addressing. `node <name|id> <cmd>` treats every node
 // equally — the central and each backhaul peripheral. When the target resolves to THIS
@@ -39,9 +52,9 @@ void setLocalExec(LocalExecFn fn);
 
 #ifdef WITH_OBSERVER
 // Runtime observation toggle. Gates the meshconsole::log* emission in the app's
-// logRx/logTx hooks, so the packet feed can be silenced/enabled live via `log
+// logRx/logTx hooks, so the packet feed can be silenced/enabled live via `feed
 // on|off` without a reflash. Defaults on for the observer role; overridden at boot
-// by a persisted `log off` in /cliext_cfg.
+// by a persisted `feed off` in /cliext_cfg.
 extern bool g_packet_dump_enabled;
 #endif
 

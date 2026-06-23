@@ -45,12 +45,12 @@ SimpleMeshTables tables;
 
     // Route the console CLI (which on the mast is the BLE NUS backhaul) through the
     // feature-gated extension commands before the upstream CommonCLI. simple_repeater's
-    // MyMesh::handleCommand stays pristine; the mast gains backhaul/log/eth/tcpota here.
+    // MyMesh::handleCommand stays pristine; the mast gains backhaul/feed/help/start-dfu here.
     void handleCommand(uint32_t sender_timestamp, char* command, char* reply) override {
       // Extension commands serve BOTH the local/backhaul console (sender_timestamp
       // == 0, the mast's CONSOLE = BLE NUS) and the over-the-air admin path:
       // onPeerDataRecv only routes CLI text here for clients that pass isAdmin(),
-      // so companion remote-management can run backhaul/log/get-set too. cliext's
+      // so companion remote-management can run backhaul/feed/get-set too. cliext's
       // set/get fall through to upstream CommonCLI for keys it doesn't own.
       if (cliext::handleCommand(command, reply)) return;
       MyMesh::handleCommand(sender_timestamp, command, reply);
@@ -70,10 +70,10 @@ SimpleMeshTables tables;
       // Human text feed. On the backhaul mast this is dropped: the feed now rides the
       // structured OBSERVATION frames (→ MQTT), and the old :5001 text sink is gone — so
       // emitting text here would just be wasted BLE bandwidth contending with the frames.
-      if (cliext::g_packet_dump_enabled)   // runtime observation toggle (`log on|off`)
+      if (cliext::g_packet_dump_enabled)   // runtime observation toggle (`feed on|off`)
         meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
 #else
-      observer::onPacketRx(pkt, score);    // frame to the central (gated on `log on|off`)
+      observer::onPacketRx(pkt, score);    // frame to the central (gated on `feed on|off`)
 #endif
     }
     void logTx(mesh::Packet* pkt, int len) override {
@@ -99,6 +99,16 @@ static void mastConsoleExec(const char* cmd, char* reply, size_t cap) {
   (void)cap;
   char buf[160];
   strncpy(buf, cmd, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+  reply[0] = 0;
+  the_mesh.handleCommand(0, buf, reply);
+}
+
+// Native DFU for `start dfu` on the mast: reuse upstream's `start ota`, which calls
+// _board->startOTAUpdate() → BleConsole.prepareForDfu() to re-advertise the bootloader's
+// BLE DFU. cliext can't reach the board, so it dispatches here via setDfuHandler().
+static void mastStartDfu(char* reply, size_t cap) {
+  (void)cap;
+  char buf[16]; strcpy(buf, "start ota");
   reply[0] = 0;
   the_mesh.handleCommand(0, buf, reply);
 }
@@ -182,7 +192,11 @@ void setup() {
 
   the_mesh.begin(fs);
 
-  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (log on|off)
+  cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (feed on|off)
+  cliext::setConsole(&CONSOLE);   // `help` streams its table to the mast console (Serial/NUS)
+#ifdef WITH_BACKHAUL_PERIPHERAL
+  cliext::setDfuHandler(mastStartDfu);   // `start dfu` → bootloader BLE DFU (native here)
+#endif
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
@@ -258,7 +272,7 @@ void loop() {
   }
 #endif
 
-  cliext::loop();   // services deferred extension actions (tcpota reboot)
+  cliext::loop();   // services deferred extension actions (start dfu reboot)
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS

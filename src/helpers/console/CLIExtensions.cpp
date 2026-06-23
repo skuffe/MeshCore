@@ -25,28 +25,137 @@
   #include <helpers/bridges/NtpClient.h>       // `get ntp` sync state
 #endif
 
+// Upstream CommonCLI command listing for `help`. Go-generated (tools/genclihelp.go) from
+// the pristine CommonCLI.cpp + tools/cli_help.tsv; committed so a bare `pio run` compiles.
+// Defines COMMONCLI_CMDS(X) — the upstream half of the `help` table.
+#include <generated/commoncli_help.h>
+
 namespace cliext {
 
+// ── `help` command registry ────────────────────────────────────────────────
+// Single source of truth for OUR (cliext) commands, self-documenting via the
+// `help` command. Pure-preprocessor X-macro: each X(token, group, description).
+// Sub-lists are #ifdef-gated on the same WITH_* capability flags that gate the
+// command implementations below, so a build's `help` lists exactly the commands it
+// actually carries — no runtime guard column, no hand-maintained list to rot.
+// The upstream half comes from the generated COMMONCLI_CMDS(X) (above).
+#define CLIEXT_CMDS_ALWAYS(X) \
+  X("help",                   "SYSTEM",  "this command list (alias '?')")
+
+#ifdef WITH_BACKHAUL_CENTRAL
+  #define CLIEXT_CMDS_NODE(X) \
+    X("node list",            "NODE",    "list all nodes (self first)") \
+    X("node <name|id> <cmd>", "NODE",    "run <cmd> on that node (self/peripheral)")
+#else
+  #define CLIEXT_CMDS_NODE(X)
+#endif
+
+#if defined(WITH_RAK13800_ETHERNET) || defined(WITH_BACKHAUL_PERIPHERAL)
+  #define CLIEXT_CMDS_DFU(X) \
+    X("start dfu",            "NODE",    "enter this node's native DFU")
+#else
+  #define CLIEXT_CMDS_DFU(X)
+#endif
+
 #ifdef WITH_OBSERVER
-  // The observer role boots with the packet dump ON. A persisted `log off` in
+  #define CLIEXT_CMDS_OBSERVE(X) \
+    X("feed on|off|status",   "OBSERVE", "observation feed toggle")
+#else
+  #define CLIEXT_CMDS_OBSERVE(X)
+#endif
+
+#ifdef WITH_RAK13800_ETHERNET
+  #define CLIEXT_CMDS_ETH(X) \
+    X("eth",                  "NET",     "ethernet link status")
+#else
+  #define CLIEXT_CMDS_ETH(X)
+#endif
+
+#if defined(WITH_BACKHAUL_CENTRAL) || defined(WITH_BACKHAUL_PERIPHERAL)
+  #define CLIEXT_CMDS_BACKHAUL(X) \
+    X("backhaul",             "NET",     "backhaul link status")
+#else
+  #define CLIEXT_CMDS_BACKHAUL(X)
+#endif
+
+#ifdef WITH_NET_BRIDGE
+  #define CLIEXT_CMDS_NET(X) \
+    X("get ntp",              "NET",     "NTP / clock status") \
+    X("set ntp.<k> <v>",      "NET",     "ntp.server | ntp.enabled") \
+    X("get mqtt [msg|<N>]",   "NET",     "MQTT status (all | toggles | slot N)") \
+    X("mqtt reset [<N>]",     "NET",     "re-arm tripped broker slot(s)") \
+    X("set mqtt[N].<k> <v>",  "NET",     "broker config / msg-type toggles") \
+    X("set observer.<n>.<k>", "OBSERVE", "rename a node / toggle its mqtt publish") \
+    X("set backhaul.timesync","NET",     "on|off — push UTC to peripherals")
+#else
+  #define CLIEXT_CMDS_NET(X)
+#endif
+
+#define CLIEXT_CMDS(X) \
+  CLIEXT_CMDS_ALWAYS(X) \
+  CLIEXT_CMDS_NODE(X) \
+  CLIEXT_CMDS_DFU(X) \
+  CLIEXT_CMDS_OBSERVE(X) \
+  CLIEXT_CMDS_ETH(X) \
+  CLIEXT_CMDS_BACKHAUL(X) \
+  CLIEXT_CMDS_NET(X)
+
+#ifdef WITH_OBSERVER
+  // The observer role boots with the packet dump ON. A persisted `feed off` in
   // /cliext_cfg (loaded by begin()) overrides this at startup.
   bool g_packet_dump_enabled = true;
 #endif
 
 #ifdef WITH_RAK13800_ETHERNET
 // Deferred reboot into the bootloader's TCP DFU mode (0 = inactive). Lets the
-// command reply drain to the client before the chip resets.
-static uint32_t _tcpota_reboot_at = 0;
+// `start dfu` reply drain to the client before the chip resets.
+static uint32_t _dfu_reboot_at = 0;
 #endif
 
 // Local-exec hook for self-addressed `node <self> <cmd>` (uniform node addressing).
 static LocalExecFn s_local_exec = nullptr;
 void setLocalExec(LocalExecFn fn) { s_local_exec = fn; }
 
+// Active console stream (set by each app to its CONSOLE: EthConsole on the central's
+// :5000, BleConsole/Serial on the mast). `help` streams its multi-line table here rather
+// than into the 160-byte reply — which also makes `node <edge> help` work: the edge
+// streams the listing to its NUS as plain text, and the central forwards that stray
+// (non-frame) text to :5000 (BleNusRelay PASS path).
+static Stream* s_console = nullptr;
+void setConsole(Stream* s) { s_console = s; }
+
+// Paced line emit for multi-line console output (`help`). A large reply (the help table is
+// ~2.5 KB) streamed flat over the BLE backhaul can outrun the consumer: the central drains
+// its NUS RX FIFO only once per loop(), so a flat blast can overflow it AND starve the
+// interleaved observation frames sharing the pipe. We cap in-flight bytes — after roughly a
+// notification window's worth, flush + yield + a short pause so the link drains before more
+// is queued. This bounds occupancy to well under BLE_RELAY_RX_FIFO regardless of the reply's
+// total length, so output can never overflow (the enlarged FIFO is then pure headroom), and
+// concurrent observation frames keep flowing. Direct consoles (TCP/serial) have their own
+// flow control; the brief pacing there is harmless on an operator-invoked command.
+static uint16_t s_emit_pending = 0;
+static void emitLine(const char* line) {
+  if (!s_console) return;
+  s_console->println(line);
+  s_emit_pending += (uint16_t)strlen(line) + 2;   // + CRLF
+  if (s_emit_pending >= 192) {                     // ~one BLE notification window
+    s_console->flush();
+    yield();                                       // let the SoftDevice flush notifications
+    delay(4);                                       // and the central drain its RX FIFO
+    s_emit_pending = 0;
+  }
+}
+
+// Native-DFU hook for `start dfu` on nodes whose native DFU isn't the ethernet TCP path
+// (i.e. the BLE-bootloader edge). The central's ethernet DFU is handled inline below; a
+// peripheral registers a handler that triggers its bootloader BLE DFU. Unset → "no DFU".
+static DfuFn s_dfu = nullptr;
+void setDfuHandler(DfuFn fn) { s_dfu = fn; }
+
 void begin(FILESYSTEM* fs) {
   configBegin(fs);   // load /cliext_cfg (or defaults)
 #ifdef WITH_OBSERVER
-  // Once the operator has set `log on|off`, that persisted choice overrides the
+  // Once the operator has set `feed on|off`, that persisted choice overrides the
   // WITH_OBSERVER build seed; an unset (-1) store leaves the seed in place.
   if (config().packet_dump >= 0) {
     g_packet_dump_enabled = (config().packet_dump == 1);
@@ -73,12 +182,33 @@ static bool parseOnOff(const char* v, uint8_t* out) {
 bool handleCommand(const char* command, char* reply) {
   (void)command; (void)reply;
 
+  // `help` / `?` — print the command set this build actually carries (native CLIEXT_CMDS
+  // registry + the Go-generated upstream COMMONCLI_CMDS), streamed to the console so it
+  // isn't bound by the 160-byte reply. Available on every node; routes through uniform
+  // addressing (`node <x> help` self-documents node x's own compiled-in commands).
+  if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
+    if (!s_console) { strcpy(reply, "help: console unavailable"); return true; }
+    s_emit_pending = 0;
+    emitLine("commands on this node:");
+    #define X(tok, grp, desc) { char ln[120]; \
+      snprintf(ln, sizeof ln, "  %-8s %-24s %s", grp, tok, desc); emitLine(ln); }
+    CLIEXT_CMDS(X)
+    emitLine("  -- upstream (CommonCLI) --");
+    COMMONCLI_CMDS(X)
+    #undef X
+    s_console->flush();
+    reply[0] = 0;   // already streamed (paced); nothing for the caller to print
+    return true;
+  }
+
 #ifdef WITH_RAK13800_ETHERNET
-  if (strcmp(command, "start tcpota") == 0) {
+  // Central's native DFU: reboot into the (forked) bootloader's TCP DFU receiver on :4444
+  // (was `start tcpota`; renamed to the uniform `start dfu` — each node does its native DFU).
+  if (strcmp(command, "start dfu") == 0) {
     char ip_str[16];
     if (EthConsole.prepareTcpDfuHandoff(4444, ip_str)) {
       sprintf(reply, "TCP DFU: rebooting, send image to %s:4444", ip_str);
-      _tcpota_reboot_at = millis() + 700;   // let the reply drain first
+      _dfu_reboot_at = millis() + 700;   // let the reply drain first
     } else {
       strcpy(reply, "Err - ethernet not up");
     }
@@ -114,6 +244,18 @@ bool handleCommand(const char* command, char* reply) {
       strcpy(reply, "backhaul: no central (advertising)");
     }
   #endif
+    return true;
+  }
+#endif
+
+#if defined(WITH_BACKHAUL_PERIPHERAL) && !defined(WITH_RAK13800_ETHERNET)
+  // Edge node's native DFU: hand off to the bootloader's BLE DFU (Adafruit BLEDfu). The
+  // app can't reach the board directly from here, so the role main registers a handler
+  // (setDfuHandler) that runs upstream's `start ota` → startOTAUpdate() → re-advertise.
+  // Reached locally (mast serial) or via `node <edge> start dfu` over the backhaul.
+  if (strcmp(command, "start dfu") == 0) {
+    if (s_dfu) s_dfu(reply, CLIEXT_REPLY_CAP);
+    else       strcpy(reply, "dfu: handler unset");
     return true;
   }
 #endif
@@ -176,22 +318,25 @@ bool handleCommand(const char* command, char* reply) {
 #endif
 
 #ifdef WITH_OBSERVER
-  if (strcmp(command, "log on") == 0) {
+  // Observation-feed toggle. Renamed from `log on|off|status` → `feed …` so it no longer
+  // collides with upstream CommonCLI's flash packet-log (`log start|stop|erase`), which now
+  // reaches CommonCLI unshadowed. The persisted config field stays `packet_dump`.
+  if (strcmp(command, "feed on") == 0) {
     g_packet_dump_enabled = true;
     config().packet_dump = 1;   // persist across reboot/reflash
     configSave();
-    strcpy(reply, "log: on");
+    strcpy(reply, "feed: on");
     return true;
   }
-  if (strcmp(command, "log off") == 0) {
+  if (strcmp(command, "feed off") == 0) {
     g_packet_dump_enabled = false;
     config().packet_dump = 0;
     configSave();
-    strcpy(reply, "log: off");
+    strcpy(reply, "feed: off");
     return true;
   }
-  if (strcmp(command, "log") == 0 || strcmp(command, "log status") == 0) {
-    sprintf(reply, "log: %s", g_packet_dump_enabled ? "on" : "off");
+  if (strcmp(command, "feed") == 0 || strcmp(command, "feed status") == 0) {
+    sprintf(reply, "feed: %s", g_packet_dump_enabled ? "on" : "off");
     return true;
   }
 #endif
@@ -245,22 +390,8 @@ bool handleCommand(const char* command, char* reply) {
              (unsigned)g.status_interval_s);
     return true;
   }
-  // `observer list` → the observer table: index, source (self/relay), name (or pubkey
-  // prefix), and per-observer MQTT publish toggle. Index 0 is this node; 1.. are
-  // backhaul observers auto-populated from their IDENTITY frames.
-  if (strcmp(command, "observer list") == 0) {
-    int n = 0;
-    for (int i = 0; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
-      const Observer& o = config().observers[i];
-      if (!o.pubkey_hex[0]) continue;
-      char id8[9]; strncpy(id8, o.pubkey_hex, 8); id8[8] = 0;
-      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%d:%s %s mqtt=%s",
-                    n ? " | " : "", i, o.source == OBS_LOCAL ? "self" : "relay",
-                    o.name[0] ? o.name : id8, o.mqtt_enabled ? "on" : "off");
-    }
-    if (!n) strcpy(reply, "observer: none");
-    return true;
-  }
+  // (`observer list` retired — folded into `node list`, the single node enumerator.
+  // Per-observer mqtt state is still set via `set observer.<n>.mqtt`.)
   // `set observer.<n>.<name|mqtt> <value>` — rename an observer or toggle its publishing.
   if (strncmp(command, "set observer.", 13) == 0) {
     const char* rest = command + 13;          // "<n>.<field> <value>"
@@ -419,7 +550,7 @@ bool handleCommand(const char* command, char* reply) {
 
 void loop() {
 #ifdef WITH_RAK13800_ETHERNET
-  if (_tcpota_reboot_at && (long)(millis() - _tcpota_reboot_at) >= 0) {
+  if (_dfu_reboot_at && (long)(millis() - _dfu_reboot_at) >= 0) {
     NRF_POWER->GPREGRET = DFU_MAGIC_TCP_RESET;
     NVIC_SystemReset();
   }
