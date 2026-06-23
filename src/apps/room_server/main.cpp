@@ -50,6 +50,16 @@ void halt() {
 
 static char command[MAX_POST_TEXT_LEN+1];
 
+// Local-exec hook for cliext's uniform node addressing: when `node <self> <cmd>` targets
+// this central, run <cmd> through the full dispatch (cliext + CommonCLI) and return its reply.
+static void centralLocalExec(const char* cmd, char* reply, size_t cap) {
+  char buf[160];                                  // handleCommand needs a mutable command buffer
+  strncpy(buf, cmd, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+  reply[0] = 0;
+  the_mesh.handleCommand(0, buf, reply);          // reply cap is CLIEXT_REPLY_CAP (160); buf < cap
+  (void)cap;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -105,6 +115,7 @@ void setup() {
   the_mesh.begin(fs);
 
   cliext::begin(fs);   // load /cliext_cfg + seed durable runtime toggles (log on|off)
+  cliext::setLocalExec(centralLocalExec);   // `node <self> <cmd>` runs locally (uniform addressing)
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);

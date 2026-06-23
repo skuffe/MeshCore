@@ -29,6 +29,14 @@ bool handleCommand(const char* command, char* reply);
 // call once per main loop from every app that includes this module.
 void loop();
 
+// Local-exec hook for uniform node addressing. `node <name|id> <cmd>` treats every node
+// equally — the central and each backhaul peripheral. When the target resolves to THIS
+// node (self), the command runs locally and its reply returns inline; the app wires this
+// to its own full dispatch (cliext + CommonCLI). A peripheral target relays over the
+// backhaul as before. Without this hook, self-addressed commands are rejected.
+typedef void (*LocalExecFn)(const char* cmd, char* reply, size_t cap);
+void setLocalExec(LocalExecFn fn);
+
 #ifdef WITH_OBSERVER
 // Runtime observation toggle. Gates the meshconsole::log* emission in the app's
 // logRx/logTx hooks, so the packet feed can be silenced/enabled live via `log

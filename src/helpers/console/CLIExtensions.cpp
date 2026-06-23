@@ -39,6 +39,10 @@ namespace cliext {
 static uint32_t _tcpota_reboot_at = 0;
 #endif
 
+// Local-exec hook for self-addressed `node <self> <cmd>` (uniform node addressing).
+static LocalExecFn s_local_exec = nullptr;
+void setLocalExec(LocalExecFn fn) { s_local_exec = fn; }
+
 void begin(FILESYSTEM* fs) {
   configBegin(fs);   // load /cliext_cfg (or defaults)
 #ifdef WITH_OBSERVER
@@ -115,20 +119,23 @@ bool handleCommand(const char* command, char* reply) {
 #endif
 
 #ifdef WITH_BACKHAUL_CENTRAL
-  // Remote-admin over the backhaul (replaces the retired :5001 passthrough). `node list`
-  // shows the reachable backhaul observers; `node <name|idprefix> <cmd>` forwards a console
-  // command to that peripheral as a FRAME_CONSOLE — the reply arrives asynchronously and is
-  // printed to this :5000 console. (Auth-gating the remote-admin surface is phase B3.)
+  // Uniform node addressing (replaces the retired :5001 passthrough). Every node is equal:
+  // `node list` enumerates them all (self first, then backhaul peripherals); `node <name|id>
+  // <cmd>` runs <cmd> on that node. Self → runs locally, reply inline. A peripheral → relays
+  // as a FRAME_CONSOLE, reply arrives asynchronously tagged "[mast] ..." on this :5000 console.
+  // (Auth-gating the remote-admin surface is phase B3.) `nodeMatches` below is the shared
+  // self(0)/relay(1..) enumerator.
   if (strcmp(command, "node list") == 0) {
     int n = 0;
-    for (int i = 1; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
+    for (int i = 0; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
       const Observer& o = config().observers[i];
-      if (!o.pubkey_hex[0] || o.source != OBS_RELAY) continue;
+      if (!o.pubkey_hex[0]) continue;
+      if (i != 0 && o.source != OBS_RELAY) continue;   // slot 0 = self; others must be relays
       char id8[9]; strncpy(id8, o.pubkey_hex, 8); id8[8] = 0;
-      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%s (%s)",
-                    n ? " | " : "", o.name[0] ? o.name : id8, id8);
+      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%s (%s)%s",
+                    n ? " | " : "", o.name[0] ? o.name : id8, id8, i == 0 ? " self" : "");
     }
-    if (!n) strcpy(reply, "node: none (no backhaul observers yet)");
+    if (!n) strcpy(reply, "node: none");
     return true;
   }
   if (strncmp(command, "node ", 5) == 0) {
@@ -141,17 +148,26 @@ bool handleCommand(const char* command, char* reply) {
     memcpy(target, rest, tl); target[tl] = 0;
     const char* fwd = sp + 1;
     while (*fwd == ' ') fwd++;
-    // Match a relay observer by name (case-insensitive) or pubkey prefix.
+    // Match any node by name (case-insensitive) or pubkey prefix: slot 0 = self, 1.. = relays.
     int found = -1;
-    for (int i = 1; i < OBSERVERS_MAX; i++) {
+    for (int i = 0; i < OBSERVERS_MAX; i++) {
       const Observer& o = config().observers[i];
-      if (!o.pubkey_hex[0] || o.source != OBS_RELAY) continue;
+      if (!o.pubkey_hex[0]) continue;
+      if (i != 0 && o.source != OBS_RELAY) continue;
       if ((o.name[0] && strcasecmp(o.name, target) == 0) ||
           strncasecmp(o.pubkey_hex, target, strlen(target)) == 0) { found = i; break; }
     }
-    if (found < 0)            { snprintf(reply, CLIEXT_REPLY_CAP, "node: '%s' not found (see 'node list')", target); return true; }
-    if (!BleRelay.linkUp())   { strcpy(reply, "node: backhaul down"); return true; }
-    if (!*fwd)                { strcpy(reply, "node: empty command"); return true; }
+    if (found < 0) { snprintf(reply, CLIEXT_REPLY_CAP, "node: '%s' not found (see 'node list')", target); return true; }
+    if (!*fwd)     { strcpy(reply, "node: empty command"); return true; }
+    if (found == 0) {                          // self → run locally, reply inline
+      static bool in_self;                     // guard against `node self node self ...`
+      if (!s_local_exec || in_self) { strcpy(reply, "node: self exec unavailable"); return true; }
+      in_self = true;
+      s_local_exec(fwd, reply, CLIEXT_REPLY_CAP);
+      in_self = false;
+      return true;
+    }
+    if (!BleRelay.linkUp()) { strcpy(reply, "node: backhaul down"); return true; }
     BleRelay.sendConsole(fwd);
     snprintf(reply, CLIEXT_REPLY_CAP, "node %s: sent (reply async)",
              config().observers[found].name[0] ? config().observers[found].name : target);
