@@ -5,12 +5,14 @@ namespace cliext {
 
 static const char*    CONFIG_PATH    = "/cliext_cfg";
 static const uint32_t CONFIG_MAGIC   = 0x43584C43;  // 'CLXC'
-// v4: appended NTP fields (ntp_enabled + ntp_server) after the message toggles. v3 added
-// the global message-type toggles; v2 added slots[MQTT_SLOTS] after the legacy mqtt_*
-// block (migrated on load). Same append-only rule throughout: the loader reads
-// min(body_len, sizeof), so an older file leaves the newer tail at its configReset
-// default and a newer file loses only its extra tail in an older build. Bump = docs.
-static const uint16_t CONFIG_VERSION = 4;
+// v6: appended backhaul_timesync toggle. v5: appended observers[OBSERVERS_MAX] (multi-observer
+// phase). v4 appended NTP fields
+// (ntp_enabled + ntp_server) after the message toggles. v3 added the global message-type
+// toggles; v2 added slots[MQTT_SLOTS] after the legacy mqtt_* block (migrated on load).
+// Same append-only rule throughout: the loader reads min(body_len, sizeof), so an older
+// file leaves the newer tail at its configReset default and a newer file loses only its
+// extra tail in an older build. Bump = docs.
+static const uint16_t CONFIG_VERSION = 6;
 
 // Fixed-size on-disk preamble. `body_len` records how many Config bytes were written
 // so a newer build (larger struct) knows how much of an older, shorter file is real.
@@ -42,6 +44,46 @@ void configReset() {
   // is free at refresh time it backs off and retries (never holds one, never wedges).
   _cfg.ntp_enabled = 1;
   // ntp_server left empty == use NTP_DEFAULT_SERVER fallback
+  // Observers: all empty/unset. observers[0] gets the local identity at boot
+  // (observerSetLocal); relay observers are filled from IDENTITY frames. A freshly
+  // discovered observer defaults mqtt_enabled ON — the operator added the backhaul
+  // deliberately; the per-observer toggle exists to turn one OFF (e.g. the indoor
+  // central that captures little). All zero here == "unset", caught at upsert/setLocal.
+  _cfg.backhaul_timesync = 1;   // push central UTC to backhaul observers by default
+}
+
+int observerUpsert(const char* pubkey_hex, const char* name, uint8_t source) {
+  if (!pubkey_hex || !pubkey_hex[0]) return -1;
+  // Match an existing slot (case-insensitive on the hex key).
+  for (int i = 0; i < OBSERVERS_MAX; i++) {
+    if (_cfg.observers[i].pubkey_hex[0] && strcasecmp(_cfg.observers[i].pubkey_hex, pubkey_hex) == 0) {
+      if (name) { strncpy(_cfg.observers[i].name, name, sizeof(_cfg.observers[i].name) - 1);
+                  _cfg.observers[i].name[sizeof(_cfg.observers[i].name) - 1] = 0; }
+      return i;   // keep its durable mqtt_enabled
+    }
+  }
+  if (source == OBS_LOCAL) return -1;   // local only ever lives in slot 0 (observerSetLocal)
+  // Claim the first free RELAY slot (>= 1).
+  for (int i = 1; i < OBSERVERS_MAX; i++) {
+    if (_cfg.observers[i].pubkey_hex[0] == 0) {
+      Observer& o = _cfg.observers[i];
+      strncpy(o.pubkey_hex, pubkey_hex, sizeof(o.pubkey_hex) - 1); o.pubkey_hex[sizeof(o.pubkey_hex) - 1] = 0;
+      if (name) { strncpy(o.name, name, sizeof(o.name) - 1); o.name[sizeof(o.name) - 1] = 0; }
+      o.source = OBS_RELAY;
+      o.mqtt_enabled = 1;
+      return i;
+    }
+  }
+  return -1;   // table full
+}
+
+void observerSetLocal(const char* pubkey_hex, const char* name) {
+  Observer& o = _cfg.observers[0];
+  bool was_unset = (o.pubkey_hex[0] == 0);
+  if (pubkey_hex) { strncpy(o.pubkey_hex, pubkey_hex, sizeof(o.pubkey_hex) - 1); o.pubkey_hex[sizeof(o.pubkey_hex) - 1] = 0; }
+  if (name)       { strncpy(o.name, name, sizeof(o.name) - 1); o.name[sizeof(o.name) - 1] = 0; }
+  o.source = OBS_LOCAL;
+  if (was_unset) o.mqtt_enabled = 1;   // first boot: default on; later boots keep operator's choice
 }
 
 Config& config() { return _cfg; }
@@ -66,6 +108,14 @@ static void migrateLegacyToSlot0() {
     s.tls     = _cfg.mqtt_tls;
     s.enabled = _cfg.mqtt_enabled;
   }
+}
+
+// Force NUL-termination + bound the on/off byte of one observer after a raw disk read.
+static void sanitiseObserver(Observer& o) {
+  o.name[sizeof(o.name) - 1]             = 0;
+  o.pubkey_hex[sizeof(o.pubkey_hex) - 1] = 0;
+  if (o.source > OBS_RELAY)   o.source = OBS_RELAY;
+  if (o.mqtt_enabled > 1)     o.mqtt_enabled = 1;
 }
 
 // Force NUL-termination + bound the on/off bytes of one slot after a raw disk read.
@@ -117,6 +167,8 @@ void configBegin(FILESYSTEM* fs) {
     if (_cfg.status_interval_s < 10) _cfg.status_interval_s = 10;   // floor; 0 would hammer
     if (_cfg.ntp_enabled > 1) _cfg.ntp_enabled = 1;
     _cfg.ntp_server[sizeof(_cfg.ntp_server) - 1] = 0;
+    for (int i = 0; i < OBSERVERS_MAX; i++) sanitiseObserver(_cfg.observers[i]);
+    if (_cfg.backhaul_timesync > 1) _cfg.backhaul_timesync = 1;
   }
   f.close();
 }

@@ -8,6 +8,7 @@
 #include <Mesh.h>
 #include <helpers/console/CliextConfig.h>      // MqttSlot, MQTT_SLOTS, mqttSlot()
 #include <helpers/bridges/ObserverJson.h>      // analyzer-spec JSON builders
+#include <helpers/ByteRing.h>                  // generalized offline message cache
 
 /**
  * Native on-node MQTT publisher for the observer (Phase B1).
@@ -55,16 +56,26 @@ public:
   void loop();           // keepalive, throttled reconnect, queue drain, periodic status
   void reconfigure();    // re-read cliext config (after `set mqtt*`), re-arm breakers
 
-  // Feed hooks (from MyMesh, all under WITH_NET_BRIDGE):
+  // Local feed hooks (self = observers[0]; driven via helpers/Observer.h):
   void onRawRx(const uint8_t* raw, int len, float snr, float rssi); // logRxRaw
   void onPacketRx(mesh::Packet* pkt, float score);                  // logRx
   void onPacketTx(mesh::Packet* pkt);                               // logTx
+
+  // Relayed feed (from BleNusRelay's backhaul demux): a remote observer's observation,
+  // reconstructed from its framed wire bytes and published under observers[obsIdx]. `epoch`
+  // is the observer's observe-time stamp from the frame — used verbatim if plausible, else
+  // (mast clock unsynced) falls back to this node's NTP clock. Shares the exact local
+  // publish path — only the observer identity/topic/timestamp source differ.
+  void publishObservation(uint8_t obsIdx, bool is_tx, const uint8_t* wire, int wire_len,
+                          float snr, float rssi, float score, uint32_t epoch);
+  // Retained per-observer status (online/offline), published on backhaul link changes.
+  void publishObserverStatus(uint8_t obsIdx, bool online);
 
   // CLI (cliext `get mqtt*` / `mqtt reset`).
   bool slotConnected(int i);
   bool slotTripped(int i) const;
   void resetSlot(int i);          // i < 0 → all
-  int  queueDepth() const { return _q_count; }
+  int  queueDepth() const { return (int)_q.count(); }
 
 private:
   struct Slot {
@@ -76,22 +87,25 @@ private:
     bool     tripped  = false;
     uint32_t next_attempt = 0;
     bool     began    = false;
-    char     topic_packets[96];
-    char     topic_raw[96];
-    char     topic_status[96];
     char     client_id[20];
   };
 
-  struct QEntry { uint8_t type; char json[MQTT_MSG_MAX]; };
-
+  uint32_t nowEpoch();   // this node's UTC epoch (NTP), tracking the last plausible value
   ObserverJson::Ctx makeCtx();
+  ObserverJson::Ctx makeCtxFor(uint8_t obsIdx, uint32_t epoch);  // observer identity + observe time
+  bool observerEnabled(uint8_t obsIdx);
+  void buildTopic(char* out, size_t cap, int slot_i, uint8_t obsIdx, const char* suffix);
+  // Build the spec JSON for a packet observation (stamped at observe time = `epoch`) and
+  // publish/enqueue it for one observer.
+  void emitPacket(uint8_t obsIdx, mesh::Packet* pkt, bool is_tx,
+                  const uint8_t* raw, int raw_len, float snr, float rssi, float score, uint32_t epoch);
   void applyConfig();
   bool serviceConnect(int i, uint32_t now);    // one throttled connect attempt
-  void publishStatusToSlot(int i, bool online);
-  void publishLive(const char* topic_suffix, MsgType type, const char* json);
+  void publishStatusToSlot(int i, uint8_t obsIdx, bool online);
+  void publishLive(uint8_t obsIdx, MsgType type, const char* json);
   bool anyConnected();
   void drainQueue();
-  void enqueue(MsgType type, const char* json);
+  void enqueue(uint8_t obsIdx, MsgType type, const char* json);
   void maybePeriodicStatus(uint32_t now);
 
   mesh::RTCClock* _rtc = nullptr;
@@ -105,6 +119,7 @@ private:
   Slot     _slots[MQTT_SLOTS];
   uint8_t  _attempt_cursor = 0;
   uint32_t _last_status_ms = 0;
+  uint32_t _last_epoch = 0;   // last plausible UTC epoch seen (NTP or backhaul) — fallback floor
 
   // RX raw staging: onRawRx() stashes the radio bytes + metrics, onPacketRx() consumes
   // them for the packet JSON's raw/SNR/RSSI (mirrors agessaman storeRawRadioData).
@@ -113,10 +128,11 @@ private:
   float    _staged_snr = 0, _staged_rssi = 0;
   bool     _staged_valid = false;
 
-  static const int QUEUE_ENTRIES = MQTT_QUEUE_BYTES / (int)sizeof(QEntry);
-  QEntry   _queue[QUEUE_ENTRIES];
-  uint16_t _q_head = 0, _q_tail = 0, _q_count = 0;
-  uint32_t _disconnected_since = 0;
+  // Offline message cache (generalized ByteRing): variable-length records
+  // [observer:1][type:1][json...]. Drop-oldest, no time expiry — JSON is stamped at observe
+  // time so a late-drained message keeps its true timestamp. Drains FIFO on broker reconnect.
+  uint8_t  _q_arena[MQTT_QUEUE_BYTES];
+  ByteRing _q;
 };
 
 extern MqttPublisher MqttPub;

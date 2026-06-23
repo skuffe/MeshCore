@@ -32,6 +32,7 @@
 #ifdef WITH_NET_BRIDGE
   #include <helpers/bridges/MqttPublisher.h>   // native on-node MQTT publish (Phase B1)
   #include <helpers/bridges/NtpClient.h>       // keep the mesh RTC in UTC for JSON timestamps
+  #include <helpers/console/CliextConfig.h>    // observerSetLocal() — register self in the observer table
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -120,6 +121,7 @@ void setup() {
 
 #ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.begin();   // BLE central → mast NUS, bridged to TCP :5001
+  BleRelay.setRtc(the_mesh.getRTCClock());   // push NTP UTC to the mast (backhaul time sync)
 #endif
 
 #ifdef WITH_NET_BRIDGE
@@ -129,6 +131,10 @@ void setup() {
   MqttPub.setContext(the_mesh.getRTCClock(), the_mesh.getNodeName(), obs_pubkey,
                      "RAK4631", FIRMWARE_VERSION, "SX1262",
                      "wismesh-observer/" FIRMWARE_VERSION);
+  // observers[0] = this node (LOCAL). Persist so the operator's per-observer mqtt toggle
+  // survives reboots (first boot defaults on; later boots keep the saved choice).
+  cliext::observerSetLocal(obs_pubkey, the_mesh.getNodeName());
+  cliext::configSave();
   MqttPub.begin();   // inert unless mqtt.enabled + provisioned (see `set mqtt.*`)
   Ntp.begin(the_mesh.getRTCClock());   // sync UTC once ethernet is up, then hourly
 #endif

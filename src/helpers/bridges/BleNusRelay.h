@@ -6,6 +6,9 @@
 #include <bluefruit.h>
 #include <SPI.h>
 #include <RAK13800_W5100S.h>
+#include <helpers/bridges/BackhaulFrame.h>   // structured-observation demux off the NUS feed
+
+namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch → mast)
 
 // TCP port the relayed remote-NUS feed is served on (a second mcbridge consumes
 // it, distinct from EthConsole's :5000).
@@ -35,6 +38,10 @@ public:
   void begin();   // lightweight: just records the singleton. Safe in setup().
   void loop();    // lazily brings up BLE + the listener once ethernet is up, then pumps
 
+  // Bind the node's NTP-synced RTC so the relay can push UTC to the mast over the backhaul
+  // (FRAME_TIME), gated on the backhaul_timesync config toggle. Call once at boot.
+  void setRtc(mesh::RTCClock* rtc) { _rtc = rtc; }
+
   // Backhaul link telemetry (consumed by cliext's `backhaul` command). linkUp()
   // is true once the NUS pipe is discovered and notifications are enabled; rssi()
   // returns the last monitored connection RSSI in dBm (0 when down).
@@ -48,6 +55,19 @@ public:
 
 private:
   void startBle();   // Bluefruit central init — deferred out of setup() (see .cpp)
+  void dispatchFrame();   // hand a complete backhaul frame to the MQTT publisher
+
+  // Structured-backhaul demux: the mast multiplexes 0x1E-prefixed observation/identity/
+  // status frames onto the same NUS pipe as its text console. _parser splits them — text
+  // bytes are forwarded to the :5001 TCP console, frames are decoded and published under
+  // the mast's observer identity. _mast_obs_idx is the mast's slot in the observer table
+  // (resolved from its IDENTITY frame; -1 until then, so observations before identity are
+  // dropped). _mast_online edge-detects link state to publish the mast's online/offline.
+  backhaul::Parser _parser;
+  int              _mast_obs_idx = -1;
+  bool             _mast_online  = false;
+  mesh::RTCClock*  _rtc = nullptr;       // for FRAME_TIME pushes to the mast
+  uint32_t         _next_time_push = 0;  // throttle the backhaul time-sync send
 
   // Heap-allocated in startBle(), NOT a static member: BLEClientUart's ctor
   // mallocs an RX FIFO, which faults during C++ static-init on this build (the

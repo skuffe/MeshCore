@@ -93,7 +93,20 @@ size_t BleConsoleStream::write(uint8_t c) {
 
 size_t BleConsoleStream::write(const uint8_t* buf, size_t size) {
   Serial.write(buf, size);
-  if (_bleuart && Bluefruit.connected() > 0) _bleuart->write(buf, size);
+  // Send the WHOLE buffer over NUS. BLEUart::write can short-write when its TX FIFO is
+  // full; one call could truncate a large frame (a max-size ~270 B observation spans many
+  // 20 B notifications) → the central's checksum fails and the frame is dropped, while
+  // tiny IDENTITY/STATUS frames slip through. Loop until all bytes are queued, yielding so
+  // the SoftDevice can flush notifications; the guard bounds it if the link stalls.
+  if (_bleuart && Bluefruit.connected() > 0) {
+    size_t off = 0;
+    uint32_t guard = 0;
+    while (off < size && guard++ < 2000) {
+      size_t w = _bleuart->write(buf + off, size - off);
+      off += w;
+      if (off < size) yield();   // let the BLE stack drain queued notifications
+    }
+  }
   return size;
 }
 

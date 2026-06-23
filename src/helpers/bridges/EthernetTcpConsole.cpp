@@ -122,6 +122,12 @@ void EthernetTcpConsole::loop() {
   serviceLink();
   if (!_ready) return;
 
+  // Free the W5100S socket as soon as the peer disconnects, rather than holding it
+  // until a NEW client is accepted. The W5100S has only 4 hardware sockets; a client
+  // left in CLOSE_WAIT pins one, and with the :5000 + :5001 listeners + MQTT already
+  // resident that starves the listener → new connections are refused until displaced.
+  if (_client && !_client.connected()) _client.stop();
+
   EthernetClient incoming = server.accept();
   if (incoming) {
     if (_client) _client.stop();   // new connection displaces the old one

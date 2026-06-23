@@ -183,14 +183,64 @@ bool handleCommand(const char* command, char* reply) {
              (unsigned)g.status_interval_s);
     return true;
   }
+  // `observer list` → the observer table: index, source (self/relay), name (or pubkey
+  // prefix), and per-observer MQTT publish toggle. Index 0 is this node; 1.. are
+  // backhaul observers auto-populated from their IDENTITY frames.
+  if (strcmp(command, "observer list") == 0) {
+    int n = 0;
+    for (int i = 0; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
+      const Observer& o = config().observers[i];
+      if (!o.pubkey_hex[0]) continue;
+      char id8[9]; strncpy(id8, o.pubkey_hex, 8); id8[8] = 0;
+      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%d:%s %s mqtt=%s",
+                    n ? " | " : "", i, o.source == OBS_LOCAL ? "self" : "relay",
+                    o.name[0] ? o.name : id8, o.mqtt_enabled ? "on" : "off");
+    }
+    if (!n) strcpy(reply, "observer: none");
+    return true;
+  }
+  // `set observer.<n>.<name|mqtt> <value>` — rename an observer or toggle its publishing.
+  if (strncmp(command, "set observer.", 13) == 0) {
+    const char* rest = command + 13;          // "<n>.<field> <value>"
+    char* endp;
+    long n = strtol(rest, &endp, 10);
+    if (endp == rest || *endp != '.') { strcpy(reply, "set: usage 'set observer.<n>.<name|mqtt> <value>'"); return true; }
+    if (n < 0 || n >= OBSERVERS_MAX)  { snprintf(reply, CLIEXT_REPLY_CAP, "set: observer 0..%d", OBSERVERS_MAX - 1); return true; }
+    const char* fieldpart = endp + 1;         // "<field> <value>"
+    const char* sp = strchr(fieldpart, ' ');
+    if (!sp || sp == fieldpart) { strcpy(reply, "set: usage 'set observer.<n>.<name|mqtt> <value>'"); return true; }
+    char field[16];
+    size_t fl = (size_t)(sp - fieldpart);
+    if (fl >= sizeof(field)) fl = sizeof(field) - 1;
+    memcpy(field, fieldpart, fl); field[fl] = 0;
+    const char* val = sp + 1;
+    while (*val == ' ') val++;
+
+    Observer& o = config().observers[n];
+    if (strcmp(field, "name") == 0)        setStr(o.name, sizeof(o.name), val);
+    else if (strcmp(field, "mqtt") == 0) { if (!parseOnOff(val, &o.mqtt_enabled)) { strcpy(reply, "set: observer mqtt on|off"); return true; } }
+    else { snprintf(reply, CLIEXT_REPLY_CAP, "set: unknown observer field '%s'", field); return true; }
+
+    if (configSave()) snprintf(reply, CLIEXT_REPLY_CAP, "ok: observer.%ld.%s", n, field);
+    else              strcpy(reply, "set: save failed (fs)");
+    return true;
+  }
   // NTP time-sync config + state (M2). `set ntp.server <host>` / `set ntp.enabled on|off`,
   // `get ntp`. Kept on the bridge node (WITH_NET_BRIDGE) — it owns the IP path.
   if (strcmp(command, "get ntp") == 0) {
     Config& g = config();
-    snprintf(reply, CLIEXT_REPLY_CAP, "ntp: en=%s server=%s synced=%s stage=%s",
+    snprintf(reply, CLIEXT_REPLY_CAP, "ntp: en=%s server=%s synced=%s stage=%s bh_timesync=%s",
              g.ntp_enabled ? "on" : "off",
              g.ntp_server[0] ? g.ntp_server : "pool.ntp.org(default)",
-             Ntp.synced() ? "yes" : "no", Ntp.stage());
+             Ntp.synced() ? "yes" : "no", Ntp.stage(),
+             g.backhaul_timesync ? "on" : "off");
+    return true;
+  }
+  // Backhaul time-sync service toggle (central pushes NTP UTC to the mast over the backhaul).
+  if (strcmp(command, "set backhaul.timesync on") == 0 || strcmp(command, "set backhaul.timesync off") == 0) {
+    config().backhaul_timesync = (command[23] == 'n') ? 1 : 0;   // "...o[n]" vs "...o[f]f"
+    if (configSave()) snprintf(reply, CLIEXT_REPLY_CAP, "ok: backhaul.timesync %s", config().backhaul_timesync ? "on" : "off");
+    else              strcpy(reply, "set: save failed (fs)");
     return true;
   }
   if (strncmp(command, "set ntp.", 8) == 0) {

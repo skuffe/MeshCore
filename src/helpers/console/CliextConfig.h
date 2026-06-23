@@ -32,10 +32,31 @@ struct MqttSlot {
   uint16_t port;
   char     user[32];
   char     pass[64];
-  char     topic[80];      // base topic; the publisher appends /raw, /status, ...
+  char     topic[80];      // topic PREFIX (e.g. "meshcore/RAN"); the publisher appends
+                           // /<observer_pubkey>/<packets|raw|status> per the analyzer spec
   uint8_t  tls;            // 0/1 — secure transport (8883); off until B1 TLS lands
   uint8_t  enabled;        // 0/1 — per-slot publish enable
 };
+
+// Max observers a relay-gateway node can publish for in parallel: index 0 is the node
+// itself (LOCAL, filled from self identity at boot); 1.. are remote observers reached
+// over the BLE backhaul (RELAY, auto-populated from their IDENTITY frames). Each gets
+// its own MQTT topic (<prefix>/<pubkey>/<type>) and its own on/off publish toggle.
+#ifndef OBSERVERS_MAX
+#define OBSERVERS_MAX 4
+#endif
+
+// One observer the node publishes to MQTT on behalf of. The emission mechanism is
+// identical for local and relayed observations (see helpers/Observer.h) — only the
+// transport differs — so the topic/identity/toggle live in one table here.
+struct Observer {
+  char    name[32];        // node name (origin); "" = unset
+  char    pubkey_hex[65];  // 64-hex UPPER public key (origin_id + MQTT topic device); "" = unset
+  uint8_t source;          // OBS_LOCAL / OBS_RELAY
+  uint8_t mqtt_enabled;    // 0/1 — per-observer publish toggle
+};
+
+enum : uint8_t { OBS_LOCAL = 0, OBS_RELAY = 1 };
 
 struct Config {
   // Runtime packet-observation toggle (`log on|off`), made durable. Tri-state:
@@ -77,7 +98,26 @@ struct Config {
   // server is the public pool (not a broker preset); empty falls back to NTP_DEFAULT_SERVER.
   uint8_t  ntp_enabled;       // default on (set in configReset)
   char     ntp_server[64];    // empty → NTP_DEFAULT_SERVER ("pool.ntp.org")
+
+  // Observer table (multi-observer phase), APPENDED. observers[0] = this node (LOCAL,
+  // refreshed from self identity each boot); observers[1..] = backhaul observers
+  // auto-populated from IDENTITY frames. Per-observer mqtt_enabled is durable so an
+  // operator's on/off choice survives reboots. CONFIG_VERSION bumped to 5.
+  Observer observers[OBSERVERS_MAX];
+
+  // Backhaul time-sync service (v6), APPENDED. When on, a network-connected central pushes
+  // its NTP-synced UTC epoch to backhaul peripherals (FRAME_TIME) so a non-network observer
+  // (the mast) can stamp its observations with real time. Default on (set in configReset).
+  uint8_t  backhaul_timesync;
 };
+
+// Find the observer slot whose pubkey matches `pubkey_hex` (case-insensitive); if none
+// and not local, claim a free RELAY slot (index >= 1) and populate name/pubkey/source.
+// Returns the index, or -1 if the table is full. Existing slots keep their mqtt_enabled.
+int observerUpsert(const char* pubkey_hex, const char* name, uint8_t source);
+
+// Set observers[0] to this node's identity (LOCAL). Call at boot once self_id is known.
+void observerSetLocal(const char* pubkey_hex, const char* name);
 
 // Live broker slot i (0..MQTT_SLOTS-1). Runtime access goes through here, never the
 // legacy mqtt_* fields (which are migration-source only).

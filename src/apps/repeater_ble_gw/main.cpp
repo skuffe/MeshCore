@@ -18,6 +18,7 @@
 
 #ifdef WITH_BACKHAUL_PERIPHERAL
   #include <helpers/nrf52/BleConsole.h>
+  #include <helpers/Observer.h>   // unified emission — frames observations over the backhaul
   #define CONSOLE BleConsole   // CLI + packet logs mirrored on a BLE NUS peripheral
 #else
   #define CONSOLE Serial
@@ -55,15 +56,29 @@ SimpleMeshTables tables;
       MyMesh::handleCommand(sender_timestamp, command, reply);
     }
   protected:
+    // logRxRaw stages the on-air radio bytes + metrics so the imminent logRx frames the
+    // exact `raw`/SNR/RSSI (same staging contract as the net-bridge node).
+    void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override {
+      MyMesh::logRxRaw(snr, rssi, raw, len);
+#ifdef WITH_BACKHAUL_PERIPHERAL
+      observer::onRawRx(raw, len, snr, rssi);
+#endif
+    }
     void logRx(mesh::Packet* pkt, int len, float score) override {
       MyMesh::logRx(pkt, len, score);
       if (cliext::g_packet_dump_enabled)   // runtime observation toggle (`log on|off`)
         meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
+#ifdef WITH_BACKHAUL_PERIPHERAL
+      observer::onPacketRx(pkt, score);    // frame to the central (gated on `log on|off`)
+#endif
     }
     void logTx(mesh::Packet* pkt, int len) override {
       MyMesh::logTx(pkt, len);
       if (cliext::g_packet_dump_enabled)
         meshconsole::logTx(PACKET_LOG_STREAM, getLogDateTime(), pkt, len);
+#ifdef WITH_BACKHAUL_PERIPHERAL
+      observer::onPacketTx(pkt);
+#endif
     }
   };
   ConsoleLoggingMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
@@ -162,6 +177,10 @@ void setup() {
 
 #ifdef WITH_BACKHAUL_PERIPHERAL
   BleConsole.begin();   // NUS console + dormant DFU service
+  // Bind RTC + identity. IDENTITY is framed to the central on connect (auto-populates this
+  // relay observer); the RTC stamps observations at observe time and receives backhaul time
+  // pushes (FRAME_TIME) so this non-network node can keep real UTC.
+  observer::begin(the_mesh.getRTCClock(), the_mesh.self_id.pub_key, the_mesh.getNodeName());
 #endif
 
   board.onBootComplete();
@@ -170,11 +189,17 @@ void setup() {
 void loop() {
 #ifdef WITH_BACKHAUL_PERIPHERAL
   BleConsole.loop();
+  observer::loop();   // send IDENTITY/STATUS on the backhaul link edge + periodic status
 #endif
 
   int len = strlen(command);
   while (CONSOLE.available() && len < sizeof(command)-1) {
     char c = CONSOLE.read();
+#ifdef WITH_BACKHAUL_PERIPHERAL
+    // Demux central→mast structured frames (e.g. FRAME_TIME clock pushes) out of the
+    // inbound NUS stream before the byte reaches the CLI command buffer.
+    if (observer::feedBackhaulByte((uint8_t)c)) continue;
+#endif
     if (c != '\n') {
       command[len++] = c;
       command[len] = 0;

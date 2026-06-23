@@ -18,10 +18,11 @@
 // Feature-gated CLI extension commands (start tcpota / eth / backhaul / log ...).
 #include <helpers/console/CLIExtensions.h>
 
-// Native on-node MQTT publisher (Phase B1). Tees the same packet-feed lines to the
-// broker; a line-buffering Print sink fed by the very meshconsole:: formatters below.
+// Unified observation emission (Phase B1 multi-observer). The same logRx/logTx/logRxRaw
+// hooks on BOTH node roles hand the observation to observer::on* — one mechanism; on
+// this net-bridge node it publishes locally via MqttPub (observers[0] = self).
 #ifdef WITH_NET_BRIDGE
-  #include <helpers/bridges/MqttPublisher.h>
+  #include <helpers/Observer.h>
 #endif
 
 #define REPLY_DELAY_MILLIS          1500
@@ -235,7 +236,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #ifdef WITH_NET_BRIDGE
   // Stage the raw radio bytes (for the imminent logRx packet JSON) and, if enabled,
   // publish the <base>/raw message. Same `log on|off` gate as the console feed.
-  if (cliext::g_packet_dump_enabled) MqttPub.onRawRx(raw, len, snr, rssi);
+  if (cliext::g_packet_dump_enabled) observer::onRawRx(raw, len, snr, rssi);
 #endif
 }
 
@@ -266,7 +267,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
     meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
 #endif
 #ifdef WITH_NET_BRIDGE
-  if (cliext::g_packet_dump_enabled) MqttPub.onPacketRx(pkt, score);
+  if (cliext::g_packet_dump_enabled) observer::onPacketRx(pkt, score);
 #endif
 }
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
@@ -291,7 +292,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
     meshconsole::logTx(PACKET_LOG_STREAM, getLogDateTime(), pkt, len);
 #endif
 #ifdef WITH_NET_BRIDGE
-  if (cliext::g_packet_dump_enabled) MqttPub.onPacketTx(pkt);
+  if (cliext::g_packet_dump_enabled) observer::onPacketTx(pkt);
 #endif
 }
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
