@@ -53,6 +53,12 @@ public:
   bool   linkUp() const { return _linkUp; }
   int8_t rssi() const;
 
+  // Observer-table slot of the currently linked peripheral (its IDENTITY-resolved index),
+  // or -1 when the backhaul is down or no IDENTITY has arrived yet. `node list` uses this to
+  // mark which peripheral is online. (Single-link today; generalises per-handle for a future
+  // multi-peripheral central.)
+  int activeObserverIdx() const { return _linkUp ? _mast_obs_idx : -1; }
+
   // Static BLE callbacks (route to the singleton).
   static void onScan(ble_gap_evt_adv_report_t* report);
   static void onConnect(uint16_t conn_handle);

@@ -267,17 +267,37 @@ bool handleCommand(const char* command, char* reply) {
   // as a FRAME_CONSOLE, reply arrives asynchronously tagged "[mast] ..." on this :5000 console.
   // (Auth-gating the remote-admin surface is phase B3.) `nodeMatches` below is the shared
   // self(0)/relay(1..) enumerator.
+  // LOCKED, parseable format — one node per line, whitespace-delimited, fixed column order:
+  //   <name> <id8> <role> <online> [<rssi>dBm]
+  // self first (slot 0), then backhaul peripherals. role = self|relay; online = online|offline
+  // (self is always online); rssi only on an online relay. The TUI splits on whitespace, so this
+  // FORMAT IS A CONTRACT — keep the column order/tokens stable. Streamed (like `help`) so it isn't
+  // bound by the 160 B reply, and paced so a long list can't overflow the backhaul.
   if (strcmp(command, "node list") == 0) {
-    int n = 0;
-    for (int i = 0; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
+    if (!s_console) { strcpy(reply, "node list: console unavailable"); return true; }
+    s_emit_pending = 0;
+    int active = BleRelay.activeObserverIdx();   // live peripheral's slot, or -1
+    int shown = 0;
+    for (int i = 0; i < OBSERVERS_MAX; i++) {
       const Observer& o = config().observers[i];
       if (!o.pubkey_hex[0]) continue;
       if (i != 0 && o.source != OBS_RELAY) continue;   // slot 0 = self; others must be relays
       char id8[9]; strncpy(id8, o.pubkey_hex, 8); id8[8] = 0;
-      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%s (%s)%s",
-                    n ? " | " : "", o.name[0] ? o.name : id8, id8, i == 0 ? " self" : "");
+      bool online = (i == 0) || (i == active);
+      char line[80];
+      if (i != 0 && online)
+        snprintf(line, sizeof line, "%-18s %-8s %-5s %-7s %ddBm",
+                 o.name[0] ? o.name : id8, id8, "relay", "online", (int)BleRelay.rssi());
+      else
+        snprintf(line, sizeof line, "%-18s %-8s %-5s %s",
+                 o.name[0] ? o.name : id8, id8, i == 0 ? "self" : "relay",
+                 online ? "online" : "offline");
+      emitLine(line);
+      shown++;
     }
-    if (!n) strcpy(reply, "node: none");
+    if (!shown) emitLine("(no nodes)");
+    s_console->flush();
+    reply[0] = 0;
     return true;
   }
   if (strncmp(command, "node ", 5) == 0) {
