@@ -30,6 +30,9 @@ void onPacketTx(mesh::Packet* pkt)                               { MqttPub.onPac
 static mesh::RTCClock* s_rtc = nullptr;
 static uint8_t  s_pubkey[PUB_KEY_SIZE];
 static char     s_name[32];
+static char     s_model[16];      // self-described hardware, framed in IDENTITY so the
+static char     s_firmware[16];   // central can fill this relay observer's status JSON
+static char     s_radio[12];      // (model/firmware/radio) instead of leaving it blank.
 static bool     s_have_id = false;
 
 // Staged RX radio bytes for the imminent onPacketRx (same packet, fired right after).
@@ -118,23 +121,39 @@ void onPacketTx(mesh::Packet* pkt) {
   cacheObservation(true, wbuf, wlen, 0, 0, NAN);
 }
 
-void begin(mesh::RTCClock* rtc, const uint8_t* pubkey, const char* name) {
+static void copyField(char* dst, size_t cap, const char* src) {
+  if (!src) { dst[0] = 0; return; }
+  strncpy(dst, src, cap - 1); dst[cap - 1] = 0;
+}
+
+void begin(mesh::RTCClock* rtc, const uint8_t* pubkey, const char* name,
+           const char* model, const char* firmware, const char* radio) {
   s_rtc = rtc;
   if (pubkey) memcpy(s_pubkey, pubkey, PUB_KEY_SIZE);
-  if (name) { strncpy(s_name, name, sizeof(s_name) - 1); s_name[sizeof(s_name) - 1] = 0; }
+  copyField(s_name,     sizeof(s_name),     name);
+  copyField(s_model,    sizeof(s_model),    model);
+  copyField(s_firmware, sizeof(s_firmware), firmware);
+  copyField(s_radio,    sizeof(s_radio),    radio);
   s_have_id = (pubkey != nullptr);
   s_cache.init(s_cache_arena, sizeof(s_cache_arena)); s_cache_init = true;
 }
 
 static void sendIdentity() {
   if (!s_have_id) return;
-  uint8_t payload[PUB_KEY_SIZE + sizeof(s_name)];
+  // pubkey[32] + NUL-separated fields: name\0model\0firmware\0radio (see BackhaulFrame.h).
+  uint8_t payload[PUB_KEY_SIZE + sizeof(s_name) + sizeof(s_model)
+                  + sizeof(s_firmware) + sizeof(s_radio) + 3];
+  size_t off = PUB_KEY_SIZE;
   memcpy(payload, s_pubkey, PUB_KEY_SIZE);
-  size_t nlen = strlen(s_name);
-  memcpy(payload + PUB_KEY_SIZE, s_name, nlen);
+  const char* fields[] = { s_name, s_model, s_firmware, s_radio };
+  for (int i = 0; i < 4; i++) {
+    if (i) payload[off++] = 0;                       // NUL separator between fields
+    size_t l = strlen(fields[i]);
+    memcpy(payload + off, fields[i], l); off += l;
+  }
   uint8_t frame[5 + sizeof(payload)];
   size_t n = backhaul::encode(frame, sizeof(frame), backhaul::FRAME_IDENTITY,
-                              payload, (uint16_t)(PUB_KEY_SIZE + nlen));
+                              payload, (uint16_t)off);
   if (n) BleConsole.write(frame, n);
 }
 

@@ -198,7 +198,8 @@ void setup() {
   // Bind RTC + identity. IDENTITY is framed to the central on connect (auto-populates this
   // relay observer); the RTC stamps observations at observe time and receives backhaul time
   // pushes (FRAME_TIME) so this non-network node can keep real UTC.
-  observer::begin(the_mesh.getRTCClock(), the_mesh.self_id.pub_key, the_mesh.getNodeName());
+  observer::begin(the_mesh.getRTCClock(), the_mesh.self_id.pub_key, the_mesh.getNodeName(),
+                  "RAK3401", FIRMWARE_VERSION, "SX1262");
   observer::setConsoleHandler(mastConsoleExec);   // remote-admin over the backhaul (FRAME_CONSOLE)
 #endif
 

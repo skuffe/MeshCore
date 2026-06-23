@@ -24,7 +24,9 @@ static const uint8_t FRAME_MARK = 0x1E;
 
 enum FrameType : uint8_t {
   FRAME_OBSERVATION = 1,   // a packet observation: ObsHeader + wire bytes (see below)
-  FRAME_IDENTITY    = 2,   // pubkey[32] + name (UTF-8, not NUL-terminated) — node identity
+  FRAME_IDENTITY    = 2,   // pubkey[32] + NUL-separated UTF-8 fields name\0model\0firmware\0
+                           // radio — node identity + self-described hardware. Trailing fields
+                           // are optional: a bare name with no NUL leaves the hw strings empty.
   FRAME_STATUS      = 3,   // StatusBody — periodic node stats
   FRAME_TIME        = 4,   // TimeBody — central→mast UTC epoch push (backhaul time sync)
   FRAME_CONSOLE     = 5,   // remote-admin console text. central→peripheral = command,

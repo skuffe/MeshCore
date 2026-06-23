@@ -52,6 +52,17 @@ public:
                   const char* model, const char* firmware, const char* radio,
                   const char* client_version);
 
+  // Hardware (model/firmware/radio) for a relayed observer (obsIdx != 0), self-described by
+  // the peripheral over the backhaul (FRAME_IDENTITY). Cached in RAM, refreshed each IDENTITY
+  // announce; used by makeCtxFor() so a relay observer's status JSON carries real hw instead
+  // of empty strings. obsIdx 0 (local) is sourced from setContext() and ignored here.
+  void setObserverHw(uint8_t obsIdx, const char* model, const char* firmware, const char* radio);
+
+  // Record a relayed observer's own uptime, reported over the backhaul (FRAME_STATUS). The
+  // status JSON then carries the peripheral's uptime (extrapolated between frames), not this
+  // central's. obsIdx 0 (local) uses millis() directly and is ignored here.
+  void setObserverUptime(uint8_t obsIdx, uint32_t uptime_secs);
+
   void begin();          // bind clients + apply config; call after EthConsole.begin()
   void loop();           // keepalive, throttled reconnect, queue drain, periodic status
   void reconfigure();    // re-read cliext config (after `set mqtt*`), re-arm breakers
@@ -115,6 +126,16 @@ private:
   const char* _firmware = "";
   const char* _radio = "";
   const char* _client_version = "";
+
+  // Per-relay-observer hardware, self-described over the backhaul (see setObserverHw). Index 0
+  // (local) is unused — it comes from _model/_firmware/_radio above. "" until an IDENTITY fills it.
+  char _obs_model[OBSERVERS_MAX][16] = {};
+  char _obs_firmware[OBSERVERS_MAX][16] = {};
+  char _obs_radio[OBSERVERS_MAX][12] = {};
+  // Per-relay-observer uptime (FRAME_STATUS), with the local millis() at receipt so makeCtxFor
+  // extrapolates a live value between frames. _at == 0 → no STATUS seen yet (uptime omitted).
+  uint32_t _obs_uptime[OBSERVERS_MAX] = {};
+  uint32_t _obs_uptime_at[OBSERVERS_MAX] = {};
 
   Slot     _slots[MQTT_SLOTS];
   uint8_t  _attempt_cursor = 0;

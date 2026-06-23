@@ -47,7 +47,8 @@ ObserverJson::Ctx MqttPublisher::makeCtx() {
 
 // Per-observer context: self build strings + the observe-time `epoch` (the observer's own
 // moment, per spec — NOT this node's publish time), with origin/origin_id from the observer
-// table. Relay observers (idx != 0) have no model/firmware/radio of their own → blanked.
+// table. Relay observers (idx != 0) carry the hardware they self-described over the backhaul
+// (FRAME_IDENTITY, cached via setObserverHw) — empty until that first IDENTITY arrives.
 ObserverJson::Ctx MqttPublisher::makeCtxFor(uint8_t obsIdx, uint32_t epoch) {
   ObserverJson::Ctx c = makeCtx();
   c.epoch = epoch;
@@ -55,8 +56,36 @@ ObserverJson::Ctx MqttPublisher::makeCtxFor(uint8_t obsIdx, uint32_t epoch) {
   const cliext::Observer& o = cliext::config().observers[obsIdx];
   if (o.name[0])       c.origin    = o.name;
   if (o.pubkey_hex[0]) c.origin_id = o.pubkey_hex;
-  if (obsIdx != 0) { c.model = ""; c.firmware = ""; c.radio = ""; }
+  if (obsIdx != 0) {
+    c.model    = _obs_model[obsIdx];
+    c.firmware = _obs_firmware[obsIdx];
+    c.radio    = _obs_radio[obsIdx];
+    // Peripheral's own uptime (extrapolated since the last FRAME_STATUS), not the central's.
+    c.uptime_secs = _obs_uptime_at[obsIdx]
+        ? (int)(_obs_uptime[obsIdx] + (millis() - _obs_uptime_at[obsIdx]) / 1000)
+        : -1;   // no STATUS frame yet → omit rather than report this central's uptime
+  }
   return c;
+}
+
+// Cache a relay observer's self-described hardware (from its FRAME_IDENTITY). RAM-only: it is
+// re-announced periodically, so no need to persist it (and no config-version churn).
+void MqttPublisher::setObserverHw(uint8_t obsIdx, const char* model, const char* firmware,
+                                  const char* radio) {
+  if (obsIdx == 0 || obsIdx >= OBSERVERS_MAX) return;   // 0 = local (setContext); guard bounds
+  if (model)    { strncpy(_obs_model[obsIdx],    model,    sizeof(_obs_model[obsIdx]) - 1); }
+  if (firmware) { strncpy(_obs_firmware[obsIdx], firmware, sizeof(_obs_firmware[obsIdx]) - 1); }
+  if (radio)    { strncpy(_obs_radio[obsIdx],    radio,    sizeof(_obs_radio[obsIdx]) - 1); }
+  _obs_model[obsIdx][sizeof(_obs_model[obsIdx]) - 1] = 0;
+  _obs_firmware[obsIdx][sizeof(_obs_firmware[obsIdx]) - 1] = 0;
+  _obs_radio[obsIdx][sizeof(_obs_radio[obsIdx]) - 1] = 0;
+}
+
+void MqttPublisher::setObserverUptime(uint8_t obsIdx, uint32_t uptime_secs) {
+  if (obsIdx == 0 || obsIdx >= OBSERVERS_MAX) return;   // 0 = local (millis()); guard bounds
+  _obs_uptime[obsIdx] = uptime_secs;
+  uint32_t at = millis();
+  _obs_uptime_at[obsIdx] = at ? at : 1;   // never 0 (the "no sample yet" sentinel)
 }
 
 bool MqttPublisher::observerEnabled(uint8_t obsIdx) {

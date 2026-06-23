@@ -28,9 +28,10 @@ void onPacketTx(mesh::Packet* pkt);
 
 #ifdef WITH_BACKHAUL_PERIPHERAL
 // Bind the node's RTC (for observe-time stamping + applying backhaul time pushes) and its
-// identity (pubkey + name, framed to the central so it auto-populates this relay observer).
-// Call once at boot.
-void begin(mesh::RTCClock* rtc, const uint8_t* pubkey, const char* name);
+// identity (pubkey + name + hardware: model/firmware/radio, framed to the central so it
+// auto-populates this relay observer's status JSON). Call once at boot.
+void begin(mesh::RTCClock* rtc, const uint8_t* pubkey, const char* name,
+           const char* model, const char* firmware, const char* radio);
 
 // Drive the backhaul side effects: announce IDENTITY (burst after connect, then periodic),
 // periodic STATUS, and drain the offline observation cache to the link when up. Call from

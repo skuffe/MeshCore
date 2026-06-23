@@ -187,13 +187,22 @@ void BleNusRelay::dispatchFrame() {
       if (len < PUB_KEY_SIZE) break;
       char pubhex[2 * PUB_KEY_SIZE + 1];
       for (int i = 0; i < PUB_KEY_SIZE; i++) sprintf(pubhex + i * 2, "%02X", p[i]);
-      char name[32];
-      size_t nlen = len - PUB_KEY_SIZE;
-      if (nlen >= sizeof(name)) nlen = sizeof(name) - 1;
-      memcpy(name, p + PUB_KEY_SIZE, nlen); name[nlen] = 0;
+      // Tail = NUL-separated fields name\0model\0firmware\0radio (BackhaulFrame.h). Copy with
+      // a trailing NUL so each field is a valid C-string; trailing fields may be absent (an
+      // old, pre-hw mast sends just the name with no NULs → model/firmware/radio stay empty).
+      char tail[80];
+      size_t tlen = len - PUB_KEY_SIZE;
+      if (tlen >= sizeof(tail)) tlen = sizeof(tail) - 1;
+      memcpy(tail, p + PUB_KEY_SIZE, tlen); tail[tlen] = 0;
+      const char* fields[4] = { tail, "", "", "" };   // name, model, firmware, radio
+      for (size_t i = 0, f = 1; i < tlen && f < 4; i++) {
+        if (tail[i] == 0) fields[f++] = tail + i + 1;  // next field starts after each NUL
+      }
+      const char* name = fields[0];
 
-      int idx = cliext::observerUpsert(pubhex, nlen ? name : nullptr, cliext::OBS_RELAY);
+      int idx = cliext::observerUpsert(pubhex, name[0] ? name : nullptr, cliext::OBS_RELAY);
       if (idx >= 0) {
+        MqttPub.setObserverHw((uint8_t)idx, fields[1], fields[2], fields[3]);
         if (idx != _mast_obs_idx) cliext::configSave();   // newly added observer → persist
         _mast_obs_idx = idx;
         if (!_mast_online) { MqttPub.publishObserverStatus((uint8_t)idx, true); _mast_online = true; }
@@ -211,13 +220,14 @@ void BleNusRelay::dispatchFrame() {
       break;
     }
     case backhaul::FRAME_STATUS: {
-      // Mast STATUS frame (uptime). Online status is already published on the IDENTITY/
-      // link edge; a STATUS frame simply reaffirms the link is live. Stats enrichment
-      // (carrying uptime into the status JSON) is a follow-on.
-      if (_mast_obs_idx >= 0 && !_mast_online) {
-        MqttPub.publishObserverStatus((uint8_t)_mast_obs_idx, true);
-        _mast_online = true;
-      }
+      // Mast STATUS frame: record the peripheral's own uptime, then (re)publish its retained
+      // online status so the JSON carries that uptime instead of this central's millis().
+      if (_mast_obs_idx < 0 || len < sizeof(backhaul::StatusBody)) break;
+      backhaul::StatusBody sb;
+      memcpy(&sb, p, sizeof(sb));
+      MqttPub.setObserverUptime((uint8_t)_mast_obs_idx, sb.uptime_secs);
+      MqttPub.publishObserverStatus((uint8_t)_mast_obs_idx, true);
+      _mast_online = true;
       break;
     }
     case backhaul::FRAME_CONSOLE: {
