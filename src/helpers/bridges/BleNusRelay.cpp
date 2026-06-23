@@ -100,43 +100,15 @@ int8_t BleNusRelay::rssi() const {
 void BleNusRelay::loop() {
   // One-time lazy init, gated on EthConsole reporting ready. EthConsole owns the
   // W5100S: it doesn't begin() the chip's SPI peripheral until its first DHCP
-  // lease, so we must NOT touch Ethernet (not even localIP()) before isReady() —
-  // an SPI transaction on the un-begun SPIM hard-wedges the MCU. Gating here also
-  // means BLE only comes up after :5000 is serving, keeping boot OTA-recoverable.
+  // lease, so we must NOT touch Ethernet before isReady() — an SPI transaction on
+  // the un-begun SPIM hard-wedges the MCU. Gating here also means BLE only comes up
+  // after :5000 is serving, keeping boot OTA-recoverable. (We no longer open any
+  // socket of our own — admin + feed both ride EthConsole's :5000 now — so there is
+  // nothing to re-arm across an EthConsole self-heal.)
   if (!_started) {
     if (!EthConsole.isReady()) return;
     startBle();
-    _server.begin();
     _started = true;
-    _eth_was_ready = true;
-  }
-
-  // Re-arm the :5001 listener after an ethernet self-heal. On link/lease loss
-  // EthConsole resets the W5100S, wiping every socket — including our listening
-  // socket — so re-open it on the isReady() false->true edge. BLE is unaffected
-  // (independent radio), so it is left up.
-  bool eth_ready = EthConsole.isReady();
-  if (eth_ready && !_eth_was_ready) {
-    if (_client) _client.stop();
-    _server.begin();
-  }
-  _eth_was_ready = eth_ready;
-
-  // While EthConsole is down (resetting the chip + re-acquiring DHCP) the W5100S
-  // sockets are invalid — do NOT touch them, or we stomp its recovery. Our :5001
-  // listener is re-armed on the isReady() edge above once it is back.
-  if (!eth_ready) return;
-
-  // Free the W5100S socket the moment the peer disconnects (don't hold it until a new
-  // client is accepted) — a lingering CLOSE_WAIT socket starves the 4-socket chip and
-  // gets both :5000 and :5001 refused. Same fix as EthernetTcpConsole.
-  if (_client && !_client.connected()) _client.stop();
-
-  // Accept / refresh the single TCP client.
-  EthernetClient incoming = _server.accept();
-  if (incoming) {
-    if (_client) _client.stop();   // new connection displaces the old one
-    _client = incoming;
   }
 
 #ifdef WITH_NET_BRIDGE
@@ -171,39 +143,36 @@ void BleNusRelay::loop() {
   }
 #endif
 
+  // NUS -> demux. The mast emits only structured frames now (observations/identity/status,
+  // and FRAME_CONSOLE admin replies); any stray PASS text is forwarded to the :5000 console.
   uint8_t buf[128];
   int n;
-
-  // NUS -> TCP (packet log + CLI replies from the remote node), with structured-frame
-  // demux: 0x1E-led frames are decoded (observations/identity/status) and stripped;
-  // everything else is plain console text, forwarded to the :5001 client. Text is
-  // coalesced into `txt` so we are not writing the TCP socket a byte at a time.
-  uint8_t txt[128];
-  int     txt_n = 0;
   while ((n = _clientUart->read(buf, sizeof(buf))) > 0) {
     for (int k = 0; k < n; k++) {
 #ifdef WITH_NET_BRIDGE
       backhaul::Parser::Result r = _parser.feed(buf[k]);
       if (r == backhaul::Parser::PASS) {
-        txt[txt_n++] = buf[k];
-        if (txt_n == (int)sizeof(txt)) { if (_client && _client.connected()) _client.write(txt, txt_n); txt_n = 0; }
+        EthConsole.write(buf[k]);          // stray mast text → :5000
       } else if (r == backhaul::Parser::FRAME) {
         dispatchFrame();
       }
 #else
-      txt[txt_n++] = buf[k];
-      if (txt_n == (int)sizeof(txt)) { if (_client && _client.connected()) _client.write(txt, txt_n); txt_n = 0; }
+      EthConsole.write(buf[k]);
 #endif
     }
-    if (txt_n && _client && _client.connected()) { _client.write(txt, txt_n); txt_n = 0; }
   }
+}
 
-  // TCP -> NUS (CLI commands to the remote node).
-  if (_client && _client.connected()) {
-    while ((n = _client.read(buf, sizeof(buf))) > 0) {
-      _clientUart->write(buf, n);
-    }
-  }
+// Send a console command line to the remote peripheral (FRAME_CONSOLE). The reply comes
+// back asynchronously as a FRAME_CONSOLE and dispatchFrame() prints it to :5000.
+void BleNusRelay::sendConsole(const char* cmd) {
+  if (!_linkUp || !_clientUart || !cmd) return;
+  size_t len = strlen(cmd);
+  if (len > backhaul::Parser::MAX_PAYLOAD - 1) len = backhaul::Parser::MAX_PAYLOAD - 1;
+  uint8_t frame[5 + backhaul::Parser::MAX_PAYLOAD];
+  size_t fn = backhaul::encode(frame, sizeof(frame), backhaul::FRAME_CONSOLE,
+                               (const uint8_t*)cmd, (uint16_t)len);
+  if (fn) _clientUart->write(frame, fn);
 }
 
 #ifdef WITH_NET_BRIDGE
@@ -249,6 +218,13 @@ void BleNusRelay::dispatchFrame() {
         MqttPub.publishObserverStatus((uint8_t)_mast_obs_idx, true);
         _mast_online = true;
       }
+      break;
+    }
+    case backhaul::FRAME_CONSOLE: {
+      // Remote-admin reply from the mast → print to the :5000 console (replaces :5001).
+      EthConsole.print("[mast] ");
+      EthConsole.write(p, len);
+      EthConsole.println();
       break;
     }
     default: break;

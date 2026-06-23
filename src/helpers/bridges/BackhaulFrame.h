@@ -27,6 +27,9 @@ enum FrameType : uint8_t {
   FRAME_IDENTITY    = 2,   // pubkey[32] + name (UTF-8, not NUL-terminated) — node identity
   FRAME_STATUS      = 3,   // StatusBody — periodic node stats
   FRAME_TIME        = 4,   // TimeBody — central→mast UTC epoch push (backhaul time sync)
+  FRAME_CONSOLE     = 5,   // remote-admin console text. central→peripheral = command,
+                           // peripheral→central = reply. Payload is the ASCII line (not
+                           // NUL-terminated). Replaces the old :5001 console passthrough.
 };
 
 // Epochs below this (2023-11-14) are treated as "clock not yet synced" — the central then

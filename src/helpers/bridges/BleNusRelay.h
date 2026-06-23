@@ -10,12 +10,6 @@
 
 namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch → mast)
 
-// TCP port the relayed remote-NUS feed is served on (a second mcbridge consumes
-// it, distinct from EthConsole's :5000).
-#ifndef BLE_RELAY_PORT
-  #define BLE_RELAY_PORT 5001
-#endif
-
 // TX power for the central radio. nRF52840 supports up to +8 dBm; higher power
 // improves link stability to the (possibly distant) peripheral. -D BLE_TX_POWER.
 #ifndef BLE_TX_POWER
@@ -29,14 +23,18 @@ namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch �
 #endif
 
 // BLE central that connects to a remote MeshCore node's NUS console peripheral
-// (e.g. the mast repeater running BleConsole) and bridges it bidirectionally to
-// a TCP listener on BLE_RELAY_PORT, reusing the W5100S ethernet that
-// EthernetTcpConsole already brought up (its own DHCP/socket management is left
-// untouched — this only opens a second listening socket).
+// (e.g. the mast repeater running BleConsole). The remote's observations arrive as
+// structured backhaul frames and are republished to MQTT under its observer identity;
+// remote-admin console commands are carried as FRAME_CONSOLE in both directions (the
+// reply is printed to EthConsole's :5000). No separate TCP port — :5001 is retired.
 class BleNusRelay {
 public:
   void begin();   // lightweight: just records the singleton. Safe in setup().
-  void loop();    // lazily brings up BLE + the listener once ethernet is up, then pumps
+  void loop();    // lazily brings up BLE once ethernet is up, then pumps the NUS feed
+
+  // Send a console command line to the remote peripheral (FRAME_CONSOLE). The reply
+  // arrives asynchronously and is printed to EthConsole (:5000). Used by `node <name> <cmd>`.
+  void sendConsole(const char* cmd);
 
   // Bind the node's NTP-synced RTC so the relay can push UTC to the mast over the backhaul
   // (FRAME_TIME), gated on the backhaul_timesync config toggle. Call once at boot.
@@ -58,11 +56,11 @@ private:
   void dispatchFrame();   // hand a complete backhaul frame to the MQTT publisher
 
   // Structured-backhaul demux: the mast multiplexes 0x1E-prefixed observation/identity/
-  // status frames onto the same NUS pipe as its text console. _parser splits them — text
-  // bytes are forwarded to the :5001 TCP console, frames are decoded and published under
-  // the mast's observer identity. _mast_obs_idx is the mast's slot in the observer table
-  // (resolved from its IDENTITY frame; -1 until then, so observations before identity are
-  // dropped). _mast_online edge-detects link state to publish the mast's online/offline.
+  // status/console frames onto the NUS pipe. _parser splits them; frames are decoded and
+  // observations published under the mast's observer identity, console replies printed to
+  // :5000. _mast_obs_idx is the mast's slot in the observer table (resolved from its
+  // IDENTITY frame; -1 until then, so observations before identity are dropped).
+  // _mast_online edge-detects link state to publish the mast's online/offline.
   backhaul::Parser _parser;
   int              _mast_obs_idx = -1;
   bool             _mast_online  = false;
@@ -73,10 +71,7 @@ private:
   // mallocs an RX FIFO, which faults during C++ static-init on this build (the
   // node crashes before Serial even starts). Construct it after main() instead.
   BLEClientUart* _clientUart = nullptr;
-  EthernetServer _server{BLE_RELAY_PORT};
-  EthernetClient _client;
   bool           _started = false;
-  bool           _eth_was_ready = false;   // edge-detect EthConsole self-heal
   volatile bool  _linkUp = false;
   volatile uint16_t _conn_handle = BLE_CONN_HANDLE_INVALID;  // for RSSI readback
 };

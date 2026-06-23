@@ -66,17 +66,22 @@ SimpleMeshTables tables;
     }
     void logRx(mesh::Packet* pkt, int len, float score) override {
       MyMesh::logRx(pkt, len, score);
+#ifndef WITH_BACKHAUL_PERIPHERAL
+      // Human text feed. On the backhaul mast this is dropped: the feed now rides the
+      // structured OBSERVATION frames (→ MQTT), and the old :5001 text sink is gone — so
+      // emitting text here would just be wasted BLE bandwidth contending with the frames.
       if (cliext::g_packet_dump_enabled)   // runtime observation toggle (`log on|off`)
         meshconsole::logRx(PACKET_LOG_STREAM, getLogDateTime(), *_radio, pkt, len, score);
-#ifdef WITH_BACKHAUL_PERIPHERAL
+#else
       observer::onPacketRx(pkt, score);    // frame to the central (gated on `log on|off`)
 #endif
     }
     void logTx(mesh::Packet* pkt, int len) override {
       MyMesh::logTx(pkt, len);
+#ifndef WITH_BACKHAUL_PERIPHERAL
       if (cliext::g_packet_dump_enabled)
         meshconsole::logTx(PACKET_LOG_STREAM, getLogDateTime(), pkt, len);
-#ifdef WITH_BACKHAUL_PERIPHERAL
+#else
       observer::onPacketTx(pkt);
 #endif
     }
@@ -84,6 +89,19 @@ SimpleMeshTables tables;
   ConsoleLoggingMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
 #else
   MyMesh the_mesh(board, radio_driver, *new ArduinoMillis(), fast_rng, rtc_clock, tables);
+#endif
+
+#ifdef WITH_BACKHAUL_PERIPHERAL
+// Remote-admin: a central runs commands over the backhaul (FRAME_CONSOLE). Route them
+// through the same dispatcher as the local console and return the reply. Replaces the old
+// :5001 NUS-passthrough; sender_timestamp 0 = the local/admin path (isAdmin-gated upstream).
+static void mastConsoleExec(const char* cmd, char* reply, size_t cap) {
+  (void)cap;
+  char buf[160];
+  strncpy(buf, cmd, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+  reply[0] = 0;
+  the_mesh.handleCommand(0, buf, reply);
+}
 #endif
 
 void halt() {
@@ -181,6 +199,7 @@ void setup() {
   // relay observer); the RTC stamps observations at observe time and receives backhaul time
   // pushes (FRAME_TIME) so this non-network node can keep real UTC.
   observer::begin(the_mesh.getRTCClock(), the_mesh.self_id.pub_key, the_mesh.getNodeName());
+  observer::setConsoleHandler(mastConsoleExec);   // remote-admin over the backhaul (FRAME_CONSOLE)
 #endif
 
   board.onBootComplete();

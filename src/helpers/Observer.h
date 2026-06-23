@@ -38,10 +38,16 @@ void begin(mesh::RTCClock* rtc, const uint8_t* pubkey, const char* name);
 void loop();
 
 // Feed one byte received on the backhaul (NUS) console. Returns true if the byte was part
-// of a structured frame (e.g. a FRAME_TIME clock push) and was consumed; false if it is
-// ordinary console text the caller should hand to the CLI. Lets the mast demux central→mast
-// frames out of its inbound CLI stream.
+// of a structured frame (FRAME_TIME clock push or a FRAME_CONSOLE remote-admin command)
+// and was consumed; false if it is ordinary console text the caller should hand to the CLI.
+// Lets the mast demux central→mast frames out of its inbound CLI stream.
 bool feedBackhaulByte(uint8_t b);
+
+// Remote-admin handler: runs a console command line and writes the reply into `reply`
+// (capacity `cap`). The mast sets this to its CLI dispatcher so a central can run commands
+// over the backhaul (FRAME_CONSOLE) — the replacement for the dropped :5001 passthrough.
+typedef void (*ConsoleHandler)(const char* cmd, char* reply, size_t cap);
+void setConsoleHandler(ConsoleHandler fn);
 #endif
 
 }  // namespace observer

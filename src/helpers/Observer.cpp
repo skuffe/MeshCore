@@ -65,6 +65,9 @@ static const uint32_t ANNOUNCE_PERIOD_MS = 300000;  // steady-state IDENTITY + S
 // Demux of central→mast frames out of the inbound NUS/CLI stream.
 static backhaul::Parser s_in;
 
+// Remote-admin handler (set by main): runs a console command, fills the reply buffer.
+static ConsoleHandler s_console = nullptr;
+
 static void cacheObservation(bool is_tx, const uint8_t* wire, int wire_len,
                              float snr, float rssi, float score) {
   if (!cliext::g_packet_dump_enabled) return;   // `log off` silences both feeds
@@ -177,6 +180,8 @@ void loop() {
   s_was_connected = now_conn;
 }
 
+void setConsoleHandler(ConsoleHandler fn) { s_console = fn; }
+
 bool feedBackhaulByte(uint8_t b) {
   backhaul::Parser::Result r = s_in.feed(b);
   if (r == backhaul::Parser::PASS) return false;          // ordinary CLI text → caller handles
@@ -184,6 +189,20 @@ bool feedBackhaulByte(uint8_t b) {
     if (s_in.type() == backhaul::FRAME_TIME && s_in.len() >= sizeof(backhaul::TimeBody) && s_rtc) {
       backhaul::TimeBody tb; memcpy(&tb, s_in.payload(), sizeof(tb));
       if (tb.epoch >= backhaul::EPOCH_SANE_MIN) s_rtc->setCurrentTime(tb.epoch);  // backhaul time sync
+    } else if (s_in.type() == backhaul::FRAME_CONSOLE && s_console) {
+      // Remote-admin: run the command line, frame the reply back to the central.
+      char cmd[160];
+      uint16_t l = s_in.len();
+      if (l >= sizeof(cmd)) l = sizeof(cmd) - 1;
+      memcpy(cmd, s_in.payload(), l); cmd[l] = 0;
+      char reply[160]; reply[0] = 0;
+      s_console(cmd, reply, sizeof(reply));
+      if (reply[0]) {
+        uint8_t frame[5 + sizeof(reply)];
+        size_t fn = backhaul::encode(frame, sizeof(frame), backhaul::FRAME_CONSOLE,
+                                     (const uint8_t*)reply, (uint16_t)strlen(reply));
+        if (fn) BleConsole.write(frame, fn);
+      }
     }
   }
   return true;   // EAT or FRAME — consumed as part of a structured frame

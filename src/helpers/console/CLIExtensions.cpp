@@ -1,6 +1,7 @@
 #include "CLIExtensions.h"
 #include "CliextConfig.h"
 #include <string.h>
+#include <strings.h>   // strcasecmp / strncasecmp (node-name matching)
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -109,6 +110,51 @@ bool handleCommand(const char* command, char* reply) {
       strcpy(reply, "backhaul: no central (advertising)");
     }
   #endif
+    return true;
+  }
+#endif
+
+#ifdef WITH_BACKHAUL_CENTRAL
+  // Remote-admin over the backhaul (replaces the retired :5001 passthrough). `node list`
+  // shows the reachable backhaul observers; `node <name|idprefix> <cmd>` forwards a console
+  // command to that peripheral as a FRAME_CONSOLE — the reply arrives asynchronously and is
+  // printed to this :5000 console. (Auth-gating the remote-admin surface is phase B3.)
+  if (strcmp(command, "node list") == 0) {
+    int n = 0;
+    for (int i = 1; i < OBSERVERS_MAX && n < CLIEXT_REPLY_CAP; i++) {
+      const Observer& o = config().observers[i];
+      if (!o.pubkey_hex[0] || o.source != OBS_RELAY) continue;
+      char id8[9]; strncpy(id8, o.pubkey_hex, 8); id8[8] = 0;
+      n += snprintf(reply + n, CLIEXT_REPLY_CAP - n, "%s%s (%s)",
+                    n ? " | " : "", o.name[0] ? o.name : id8, id8);
+    }
+    if (!n) strcpy(reply, "node: none (no backhaul observers yet)");
+    return true;
+  }
+  if (strncmp(command, "node ", 5) == 0) {
+    const char* rest = command + 5;            // "<name|id> <cmd>"
+    const char* sp = strchr(rest, ' ');
+    if (!sp || sp == rest) { strcpy(reply, "node: usage 'node <name|id> <cmd>'"); return true; }
+    char target[40];
+    size_t tl = (size_t)(sp - rest);
+    if (tl >= sizeof(target)) tl = sizeof(target) - 1;
+    memcpy(target, rest, tl); target[tl] = 0;
+    const char* fwd = sp + 1;
+    while (*fwd == ' ') fwd++;
+    // Match a relay observer by name (case-insensitive) or pubkey prefix.
+    int found = -1;
+    for (int i = 1; i < OBSERVERS_MAX; i++) {
+      const Observer& o = config().observers[i];
+      if (!o.pubkey_hex[0] || o.source != OBS_RELAY) continue;
+      if ((o.name[0] && strcasecmp(o.name, target) == 0) ||
+          strncasecmp(o.pubkey_hex, target, strlen(target)) == 0) { found = i; break; }
+    }
+    if (found < 0)            { snprintf(reply, CLIEXT_REPLY_CAP, "node: '%s' not found (see 'node list')", target); return true; }
+    if (!BleRelay.linkUp())   { strcpy(reply, "node: backhaul down"); return true; }
+    if (!*fwd)                { strcpy(reply, "node: empty command"); return true; }
+    BleRelay.sendConsole(fwd);
+    snprintf(reply, CLIEXT_REPLY_CAP, "node %s: sent (reply async)",
+             config().observers[found].name[0] ? config().observers[found].name : target);
     return true;
   }
 #endif
