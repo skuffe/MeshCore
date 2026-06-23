@@ -41,7 +41,7 @@ void BleNusRelay::startBle() {
   Bluefruit.Scanner.setRxCallback(onScan);
   Bluefruit.Scanner.restartOnDisconnect(true);
   Bluefruit.Scanner.setInterval(160, 80);          // units: 0.625ms
-  // NOTE: do NOT filterUuid(BLEUART_UUID_SERVICE) here. The mast advertises the
+  // NOTE: do NOT filterUuid(BLEUART_UUID_SERVICE) here. The peripheral advertises the
   // NUS UUID in the PRIMARY advert but its name in the SCAN RESPONSE — and the
   // UUID filter only passes the primary report, which carries no name, so the
   // name match in onScan would always fail (the node never connects). Instead we
@@ -116,11 +116,11 @@ void BleNusRelay::loop() {
   }
 
 #ifdef WITH_NET_BRIDGE
-  // Backhaul link dropped → flag the mast observer offline (retained), once; re-arm the
-  // time push so the next link-up syncs the mast's clock promptly.
-  if (!_linkUp && _mast_online) {
-    if (_mast_obs_idx >= 0) MqttPub.publishObserverStatus((uint8_t)_mast_obs_idx, false);
-    _mast_online = false;
+  // Backhaul link dropped → flag the peripheral observer offline (retained), once; re-arm the
+  // time push so the next link-up syncs the peripheral's clock promptly.
+  if (!_linkUp && _peer_online) {
+    if (_peer_obs_idx >= 0) MqttPub.publishObserverStatus((uint8_t)_peer_obs_idx, false);
+    _peer_online = false;
   }
   if (!_linkUp) _next_time_push = 0;
 #endif
@@ -128,9 +128,9 @@ void BleNusRelay::loop() {
   if (!_linkUp || !_clientUart) return;
 
 #ifdef WITH_NET_BRIDGE
-  // Backhaul time sync: push this node's NTP-synced UTC to the mast (FRAME_TIME) so it can
-  // stamp observations with real time. Gated on the config toggle; fires promptly on
-  // link-up then every 5 min. The mast ignores an implausible epoch.
+  // Backhaul time sync: push this node's NTP-synced UTC to the peripheral (FRAME_TIME) so it
+  // can stamp observations with real time. Gated on the config toggle; fires promptly on
+  // link-up then every 5 min. The peripheral ignores an implausible epoch.
   if (_rtc && cliext::config().backhaul_timesync) {
     uint32_t now_ms = millis();
     if ((long)(now_ms - _next_time_push) >= 0) {
@@ -147,8 +147,8 @@ void BleNusRelay::loop() {
   }
 #endif
 
-  // NUS -> demux. The mast emits only structured frames now (observations/identity/status,
-  // and FRAME_CONSOLE admin replies); any stray PASS text is forwarded to the :5000 console.
+  // NUS -> demux. The peripheral emits only structured frames now (observations/identity/
+  // status, and FRAME_CONSOLE admin replies); any stray PASS text is forwarded to :5000.
   uint8_t buf[128];
   int n;
   while ((n = _clientUart->read(buf, sizeof(buf))) > 0) {
@@ -156,7 +156,7 @@ void BleNusRelay::loop() {
 #ifdef WITH_NET_BRIDGE
       backhaul::Parser::Result r = _parser.feed(buf[k]);
       if (r == backhaul::Parser::PASS) {
-        EthConsole.write(buf[k]);          // stray mast text → :5000
+        EthConsole.write(buf[k]);          // stray peripheral text → :5000
       } else if (r == backhaul::Parser::FRAME) {
         dispatchFrame();
       }
@@ -180,8 +180,8 @@ void BleNusRelay::sendConsole(const char* cmd) {
 }
 
 #ifdef WITH_NET_BRIDGE
-// Decode one complete backhaul frame from the remote (mast) observer and route it to
-// the MQTT publisher under the mast's observer identity (auto-resolved from IDENTITY).
+// Decode one complete backhaul frame from the remote peripheral observer and route it to
+// the MQTT publisher under the peripheral's observer identity (auto-resolved from IDENTITY).
 void BleNusRelay::dispatchFrame() {
   const uint8_t* p = _parser.payload();
   uint16_t       len = _parser.len();
@@ -193,7 +193,7 @@ void BleNusRelay::dispatchFrame() {
       for (int i = 0; i < PUB_KEY_SIZE; i++) sprintf(pubhex + i * 2, "%02X", p[i]);
       // Tail = NUL-separated fields name\0model\0firmware\0radio (BackhaulFrame.h). Copy with
       // a trailing NUL so each field is a valid C-string; trailing fields may be absent (an
-      // old, pre-hw mast sends just the name with no NULs → model/firmware/radio stay empty).
+      // old, pre-hw peripheral sends just the name with no NULs → model/firmware/radio stay empty).
       char tail[80];
       size_t tlen = len - PUB_KEY_SIZE;
       if (tlen >= sizeof(tail)) tlen = sizeof(tail) - 1;
@@ -207,36 +207,47 @@ void BleNusRelay::dispatchFrame() {
       int idx = cliext::observerUpsert(pubhex, name[0] ? name : nullptr, cliext::OBS_RELAY);
       if (idx >= 0) {
         MqttPub.setObserverHw((uint8_t)idx, fields[1], fields[2], fields[3]);
-        if (idx != _mast_obs_idx) cliext::configSave();   // newly added observer → persist
-        _mast_obs_idx = idx;
-        if (!_mast_online) { MqttPub.publishObserverStatus((uint8_t)idx, true); _mast_online = true; }
+        if (idx != _peer_obs_idx) cliext::configSave();   // newly added observer → persist
+        _peer_obs_idx = idx;
+        if (!_peer_online) { MqttPub.publishObserverStatus((uint8_t)idx, true); _peer_online = true; }
       }
       break;
     }
     case backhaul::FRAME_OBSERVATION: {
-      if (_mast_obs_idx < 0 || len < sizeof(backhaul::ObsHeader)) break;   // need identity first
+      if (_peer_obs_idx < 0 || len < sizeof(backhaul::ObsHeader)) break;   // need identity first
       backhaul::ObsHeader h;
       memcpy(&h, p, sizeof(h));
       const uint8_t* wire = p + sizeof(h);
       if (sizeof(h) + h.wire_len > len) break;
-      MqttPub.publishObservation((uint8_t)_mast_obs_idx, h.is_tx, wire, h.wire_len,
+      MqttPub.publishObservation((uint8_t)_peer_obs_idx, h.is_tx, wire, h.wire_len,
                                  h.snr, h.rssi, h.score, h.epoch);
       break;
     }
     case backhaul::FRAME_STATUS: {
       // Mast STATUS frame: record the peripheral's own uptime, then (re)publish its retained
       // online status so the JSON carries that uptime instead of this central's millis().
-      if (_mast_obs_idx < 0 || len < sizeof(backhaul::StatusBody)) break;
+      if (_peer_obs_idx < 0 || len < sizeof(backhaul::StatusBody)) break;
       backhaul::StatusBody sb;
       memcpy(&sb, p, sizeof(sb));
-      MqttPub.setObserverUptime((uint8_t)_mast_obs_idx, sb.uptime_secs);
-      MqttPub.publishObserverStatus((uint8_t)_mast_obs_idx, true);
-      _mast_online = true;
+      MqttPub.setObserverUptime((uint8_t)_peer_obs_idx, sb.uptime_secs);
+      MqttPub.publishObserverStatus((uint8_t)_peer_obs_idx, true);
+      _peer_online = true;
       break;
     }
     case backhaul::FRAME_CONSOLE: {
-      // Remote-admin reply from the mast → print to the :5000 console (replaces :5001).
-      EthConsole.print("[mast] ");
+      // Remote-admin reply from the peripheral → print to the :5000 console (replaces :5001),
+      // tagged with the peripheral's CONFIGURED node name (pubkey-prefix fallback) from the
+      // observer table — never a hardcoded "mast". Same identity `node list` shows.
+      char tag[40];
+      if (_peer_obs_idx >= 0 && cliext::config().observers[_peer_obs_idx].name[0]) {
+        snprintf(tag, sizeof tag, "[%s] ", cliext::config().observers[_peer_obs_idx].name);
+      } else if (_peer_obs_idx >= 0) {
+        char id8[9]; strncpy(id8, cliext::config().observers[_peer_obs_idx].pubkey_hex, 8); id8[8] = 0;
+        snprintf(tag, sizeof tag, "[%s] ", id8);
+      } else {
+        strcpy(tag, "[node] ");
+      }
+      EthConsole.print(tag);
       EthConsole.write(p, len);
       EthConsole.println();
       break;

@@ -8,7 +8,7 @@
 #include <RAK13800_W5100S.h>
 #include <helpers/bridges/BackhaulFrame.h>   // structured-observation demux off the NUS feed
 
-namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch → mast)
+namespace mesh { class RTCClock; }   // for the backhaul time-push (NTP epoch → peripheral)
 
 // TX power for the central radio. nRF52840 supports up to +8 dBm; higher power
 // improves link stability to the (possibly distant) peripheral. -D BLE_TX_POWER.
@@ -43,7 +43,7 @@ public:
   // arrives asynchronously and is printed to EthConsole (:5000). Used by `node <name> <cmd>`.
   void sendConsole(const char* cmd);
 
-  // Bind the node's NTP-synced RTC so the relay can push UTC to the mast over the backhaul
+  // Bind the node's NTP-synced RTC so the relay can push UTC to the peripheral over the backhaul
   // (FRAME_TIME), gated on the backhaul_timesync config toggle. Call once at boot.
   void setRtc(mesh::RTCClock* rtc) { _rtc = rtc; }
 
@@ -57,7 +57,7 @@ public:
   // or -1 when the backhaul is down or no IDENTITY has arrived yet. `node list` uses this to
   // mark which peripheral is online. (Single-link today; generalises per-handle for a future
   // multi-peripheral central.)
-  int activeObserverIdx() const { return _linkUp ? _mast_obs_idx : -1; }
+  int activeObserverIdx() const { return _linkUp ? _peer_obs_idx : -1; }
 
   // Static BLE callbacks (route to the singleton).
   static void onScan(ble_gap_evt_adv_report_t* report);
@@ -68,16 +68,16 @@ private:
   void startBle();   // Bluefruit central init — deferred out of setup() (see .cpp)
   void dispatchFrame();   // hand a complete backhaul frame to the MQTT publisher
 
-  // Structured-backhaul demux: the mast multiplexes 0x1E-prefixed observation/identity/
+  // Structured-backhaul demux: the peripheral multiplexes 0x1E-prefixed observation/identity/
   // status/console frames onto the NUS pipe. _parser splits them; frames are decoded and
-  // observations published under the mast's observer identity, console replies printed to
-  // :5000. _mast_obs_idx is the mast's slot in the observer table (resolved from its
+  // observations published under the peripheral's observer identity, console replies printed
+  // to :5000. _peer_obs_idx is the peripheral's slot in the observer table (resolved from its
   // IDENTITY frame; -1 until then, so observations before identity are dropped).
-  // _mast_online edge-detects link state to publish the mast's online/offline.
+  // _peer_online edge-detects link state to publish the peripheral's online/offline.
   backhaul::Parser _parser;
-  int              _mast_obs_idx = -1;
-  bool             _mast_online  = false;
-  mesh::RTCClock*  _rtc = nullptr;       // for FRAME_TIME pushes to the mast
+  int              _peer_obs_idx = -1;
+  bool             _peer_online  = false;
+  mesh::RTCClock*  _rtc = nullptr;       // for FRAME_TIME pushes to the peripheral
   uint32_t         _next_time_push = 0;  // throttle the backhaul time-sync send
 
   // Heap-allocated in startBle(), NOT a static member: BLEClientUart's ctor
