@@ -236,16 +236,18 @@ void BleNusRelay::dispatchFrame() {
     }
     case backhaul::FRAME_CONSOLE: {
       // Remote-admin reply from the peripheral → print to the :5000 console (replaces :5001),
-      // tagged with the peripheral's CONFIGURED node name (pubkey-prefix fallback) from the
-      // observer table — never a hardcoded "mast". Same identity `node list` shows.
-      char tag[40];
+      // prefixed "  -> [<node>] " — the SAME "  -> " lead-in a self/direct reply gets, with the
+      // peripheral's CONFIGURED node name (pubkey-prefix fallback) from the observer table (never
+      // a hardcoded "mast"; same identity `node list` shows). So relayed and direct replies look
+      // identical on this console.
+      char tag[48];
       if (_peer_obs_idx >= 0 && cliext::config().observers[_peer_obs_idx].name[0]) {
-        snprintf(tag, sizeof tag, "[%s] ", cliext::config().observers[_peer_obs_idx].name);
+        snprintf(tag, sizeof tag, "  -> [%s] ", cliext::config().observers[_peer_obs_idx].name);
       } else if (_peer_obs_idx >= 0) {
         char id8[9]; strncpy(id8, cliext::config().observers[_peer_obs_idx].pubkey_hex, 8); id8[8] = 0;
-        snprintf(tag, sizeof tag, "[%s] ", id8);
+        snprintf(tag, sizeof tag, "  -> [%s] ", id8);
       } else {
-        strcpy(tag, "[node] ");
+        strcpy(tag, "  -> [node] ");
       }
       EthConsole.print(tag);
       EthConsole.write(p, len);

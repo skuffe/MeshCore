@@ -264,7 +264,9 @@ bool handleCommand(const char* command, char* reply) {
   // Uniform node addressing (replaces the retired :5001 passthrough). Every node is equal:
   // `node list` enumerates them all (self first, then backhaul peripherals); `node <name|id>
   // <cmd>` runs <cmd> on that node. Self → runs locally, reply inline. A peripheral → relays
-  // as a FRAME_CONSOLE, reply arrives asynchronously tagged "[<node-name>] ..." on this :5000 console.
+  // as a FRAME_CONSOLE, reply arrives asynchronously prefixed "  -> [<node-name>] ..." on this
+  // :5000 console — same "  -> " lead-in as a self reply, so relayed and direct replies look
+  // identical (no separate "sent (reply async)" ack line).
   // (Auth-gating the remote-admin surface is phase B3.) `nodeMatches` below is the shared
   // self(0)/relay(1..) enumerator.
   // LOCKED, parseable format — one node per line, whitespace-delimited, fixed column order:
@@ -331,8 +333,7 @@ bool handleCommand(const char* command, char* reply) {
     }
     if (!BleRelay.linkUp()) { strcpy(reply, "node: backhaul down"); return true; }
     BleRelay.sendConsole(fwd);
-    snprintf(reply, CLIEXT_REPLY_CAP, "node %s: sent (reply async)",
-             config().observers[found].name[0] ? config().observers[found].name : target);
+    reply[0] = 0;   // no sync ack — the reply returns async as "  -> [<node>] ..." (see header note)
     return true;
   }
 #endif
