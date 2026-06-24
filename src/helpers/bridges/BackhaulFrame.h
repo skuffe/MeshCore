@@ -32,7 +32,50 @@ enum FrameType : uint8_t {
   FRAME_CONSOLE     = 5,   // remote-admin console text. central→peripheral = command,
                            // peripheral→central = reply. Payload is the ASCII line (not
                            // NUL-terminated). Replaces the old :5001 console passthrough.
+  FRAME_DFU         = 6,   // B-OTA relay-flash transport. UNLIKE the others this rides the
+                           // HOST↔CENTRAL :5000 console link (not the central↔mast NUS): the
+                           // central demuxes 0x1E DFU frames off its :5000 input the same way
+                           // repeater_ble_gw demuxes the NUS stream. Payload = 1-byte DfuOp +
+                           // body (below). The central is the legacy BLE-DFU *client* to the
+                           // edge bootloader; the host (mcflash -mode backhaul) feeds the image
+                           // through these frames with windowed flow control. See DfuOp.
 };
+
+// FRAME_DFU sub-protocol (payload[0] = DfuOp, then an op body). Host→central ops drive the
+// flash; central→host ops are flow-control / status. Windowed: the host streams DFU_DATA up to
+// the window the central advertised in DFU_READY, then waits for DFU_ACK (highest contiguous
+// seq the central has pushed to the edge) before sending more — BLE GATT throughput is well
+// below the TCP feed, so without this the central's buffer overruns. A failed/aborted relay
+// leaves the edge's OLD app intact (legacy DFU is validate-before-swap / dual-bank) → retryable,
+// not a brick. Auth: UNGATED today (private-net bench); folds into B3 (bootloader DFU password).
+enum DfuOp : uint8_t {
+  // host → central
+  DFU_BEGIN    = 0x01,   // DfuBeginBody + init(.dat) bytes[init_len]. Central resolves `target`
+                         // via the observer table, commands it into bootloader DFU, scans+
+                         // connects, and primes the legacy state machine (start + init packet).
+  DFU_DATA     = 0x02,   // DfuDataBody{seq} + firmware(.bin) chunk bytes. seq is 0-based.
+  DFU_COMMIT   = 0x03,   // no body — all data sent; central validates + activates + resets edge.
+  DFU_ABORT    = 0x04,   // no body — host-side cancel; central tears down, edge keeps old app.
+  // central → host
+  DFU_READY    = 0x81,   // DfuReadyBody{window} — connected to edge bootloader, init accepted.
+  DFU_ACK      = 0x82,   // DfuAckBody{seq} — highest contiguous DFU_DATA seq pushed to the edge.
+  DFU_PROGRESS = 0x83,   // DfuProgressBody{done} — image bytes written to the edge so far.
+  DFU_DONE     = 0x84,   // no body — edge validated + resetting into the new app.
+  DFU_ERROR    = 0x85,   // ASCII reason (not NUL-terminated) — relay failed; edge unharmed.
+  DFU_STATUS   = 0x86,   // ASCII remote-state line (not NUL-terminated) — narrates the central's
+                         // progress so the operator sees live edge state: "resolving <node>",
+                         // "scanning bootloader", "connected", "writing", "validating", "reset".
+};
+
+struct __attribute__((packed)) DfuBeginBody {
+  char     target[24];   // edge node name or pubkey-hex prefix (as `node <x>` resolves); NUL-pad
+  uint16_t init_len;     // bytes of init packet (.dat) that follow this struct in the payload
+  uint32_t image_len;    // total firmware (.bin) bytes the host will send across DFU_DATA frames
+};
+struct __attribute__((packed)) DfuDataBody    { uint16_t seq; };      // + chunk bytes follow
+struct __attribute__((packed)) DfuReadyBody   { uint16_t window; };   // max in-flight DFU_DATA
+struct __attribute__((packed)) DfuAckBody     { uint16_t seq; };
+struct __attribute__((packed)) DfuProgressBody{ uint32_t done; };
 
 // Epochs below this (2023-11-14) are treated as "clock not yet synced" — the central then
 // falls back to its own NTP clock when stamping, and the mast ignores an implausible push.

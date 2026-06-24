@@ -27,6 +27,7 @@
 
 #ifdef WITH_BACKHAUL_CENTRAL
   #include <helpers/bridges/BleNusRelay.h>   // relays the mast's BLE NUS to TCP :5001
+  #include <helpers/bridges/DfuRelay.h>      // B-OTA: FRAME_DFU relay-flash of an edge node
 #endif
 
 #ifdef WITH_NET_BRIDGE
@@ -134,6 +135,8 @@ void setup() {
 #ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.begin();   // BLE central → mast NUS, bridged to TCP :5001
   BleRelay.setRtc(the_mesh.getRTCClock());   // push NTP UTC to the mast (backhaul time sync)
+  dfurelay::begin(&CONSOLE);   // demux FRAME_DFU (B-OTA) off :5000; replies go back on it
+  dfurelay::setHoldHandler([](bool h){ EthConsole.hold(h); });   // hold :5000 during a flash
 #endif
 
 #ifdef WITH_NET_BRIDGE
@@ -171,6 +174,9 @@ void loop() {
   int len = strlen(command);
   while (CONSOLE.available() && len < sizeof(command)-1) {
     char c = CONSOLE.read();
+#ifdef WITH_BACKHAUL_CENTRAL
+    if (dfurelay::feedByte((uint8_t)c)) continue;   // FRAME_DFU byte (B-OTA) → not CLI text
+#endif
     if (c == '\n') {
       // treat bare LF as Enter (nc/unix line endings); ignore the LF of a
       // CRLF pair and empty lines

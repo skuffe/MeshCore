@@ -52,6 +52,10 @@ public:
   int peek() override;
   void flush() override;
 
+  // Hold the current client's socket against displacement (a B-OTA relay flash owns :5000 for
+  // its duration; a new connection must not boot the DFU client mid-stream). Off by default.
+  void hold(bool h) { _held = h; }
+
 private:
   void serviceLink();
 
@@ -60,6 +64,7 @@ private:
   uint32_t _next_health_check = 0;   // throttles the once-ready link/lease probe
   uint32_t _attempts = 0;
   bool _ready = false;        // DHCP lease held, server listening
+  bool _held = false;         // refuse displacing clients (DFU relay in progress)
 };
 
 extern EthernetTcpConsole EthConsole;

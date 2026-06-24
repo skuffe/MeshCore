@@ -130,8 +130,14 @@ void EthernetTcpConsole::loop() {
 
   EthernetClient incoming = server.accept();
   if (incoming) {
-    if (_client) _client.stop();   // new connection displaces the old one
-    _client = incoming;
+    if (_held && _client && _client.connected()) {
+      // A B-OTA relay flash owns this socket — refuse intruders so a stray client (e.g. a
+      // meshmon TUI reconnecting) can't displace the DFU client and abort the flash mid-stream.
+      incoming.stop();
+    } else {
+      if (_client) _client.stop();   // new connection displaces the old one
+      _client = incoming;
+    }
   }
 }
 
