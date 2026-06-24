@@ -235,21 +235,12 @@ void BleNusRelay::dispatchFrame() {
       break;
     }
     case backhaul::FRAME_CONSOLE: {
-      // Remote-admin reply from the peripheral → print to the :5000 console (replaces :5001),
-      // prefixed "  -> [<node>] " — the SAME "  -> " lead-in a self/direct reply gets, with the
-      // peripheral's CONFIGURED node name (pubkey-prefix fallback) from the observer table (never
-      // a hardcoded "mast"; same identity `node list` shows). So relayed and direct replies look
-      // identical on this console.
-      char tag[48];
-      if (_peer_obs_idx >= 0 && cliext::config().observers[_peer_obs_idx].name[0]) {
-        snprintf(tag, sizeof tag, "  -> [%s] ", cliext::config().observers[_peer_obs_idx].name);
-      } else if (_peer_obs_idx >= 0) {
-        char id8[9]; strncpy(id8, cliext::config().observers[_peer_obs_idx].pubkey_hex, 8); id8[8] = 0;
-        snprintf(tag, sizeof tag, "  -> [%s] ", id8);
-      } else {
-        strcpy(tag, "  -> [node] ");
-      }
-      EthConsole.print(tag);
+      // Remote-admin reply from the peripheral → print to the :5000 console (replaces :5001)
+      // with the SAME "  -> " lead-in a self/direct reply gets, and nothing else. No "[<node>]"
+      // tag: the operator already addressed a specific node (`node <x> <cmd>`), so the origin is
+      // known — a tag is redundant (doubly so in the TUI, which shows the selected node) clutter.
+      // Relayed and direct replies are now indistinguishable on this console, which is the point.
+      EthConsole.print("  -> ");
       EthConsole.write(p, len);
       EthConsole.println();
       break;
