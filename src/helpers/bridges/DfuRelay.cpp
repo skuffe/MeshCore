@@ -22,6 +22,7 @@ uint32_t         s_image_len = 0;   // total firmware bytes the host promised in
 uint32_t         s_received = 0;    // firmware bytes accepted so far
 uint16_t         s_next_seq = 0;    // next in-order DFU_DATA seq we expect
 uint16_t         s_since_progress = 0;
+bool             s_sent_ready = false;  // DFU_READY emitted once the edge reaches RECEIVING
 char             s_target[25];      // edge node addressed by the active session
 
 const uint16_t WINDOW = 16;         // max DFU_DATA the host may keep in flight before an ACK
@@ -66,14 +67,14 @@ void handle(const uint8_t* p, uint16_t len) {
       if (len < 1 + sizeof(backhaul::DfuBeginBody)) { sendErr("BEGIN too short"); return; }
       backhaul::DfuBeginBody b;
       memcpy(&b, p + 1, sizeof b);
-      const uint8_t* init = p + 1 + sizeof b;             // .dat init packet (M2 sends to edge)
+      const uint8_t* init = p + 1 + sizeof b;             // .dat init packet (sent to the edge)
       uint16_t init_len = b.init_len;
       if (1 + sizeof b + init_len > len) { sendErr("BEGIN init_len overruns frame"); return; }
-      (void)init;
       s_image_len = b.image_len;
       s_received = 0;
       s_next_seq = 0;
       s_since_progress = 0;
+      s_sent_ready = false;
       memcpy(s_target, b.target, 24);
       s_target[24] = 0;
       s_active = true;
@@ -84,9 +85,10 @@ void handle(const uint8_t* p, uint16_t len) {
                  s_target, (unsigned long)b.image_len);
         sendStatus(st);
       }
-      // Async: hand the radio to the BLE-DFU client. DFU_READY is sent later (in loop) once the
-      // edge bootloader is connected + discovered; M2a backs off there instead of flashing.
-      bledfu::start(s_target);
+      // Async: hand the radio to the BLE-DFU client (buttonless → bootloader → legacy DFU). It
+      // gets the init(.dat) + image size now; DFU_READY is sent (in loop) once the edge is primed
+      // and reaches RECEIVING; the firmware then streams in via DFU_DATA → feedChunk.
+      bledfu::start(s_target, init, init_len, b.image_len);
       break;
     }
 
@@ -97,8 +99,10 @@ void handle(const uint8_t* p, uint16_t len) {
       memcpy(&seq, p + 1, 2);
       uint16_t chunk = len - 1 - (uint16_t)sizeof(backhaul::DfuDataBody);
       if (seq == s_next_seq) {
-        // (M2: write `chunk` bytes to the edge's DFU packet characteristic; advance only as the
-        //  edge confirms via its packet-receipt notification — that's the real backpressure.)
+        // Write the chunk to the edge's DFU packet characteristic; pktWrite paces on the
+        // SoftDevice TX buffers (real backpressure), so the ACK below means it's on the wire.
+        const uint8_t* d = p + 1 + (uint16_t)sizeof(backhaul::DfuDataBody);
+        if (!bledfu::feedChunk(d, chunk)) return;   // write failed → bledfu FAILED; loop() reports it
         s_received += chunk;
         s_next_seq++;
       }
@@ -115,27 +119,16 @@ void handle(const uint8_t* p, uint16_t len) {
       break;
     }
 
-    case backhaul::DFU_COMMIT: {
+    case backhaul::DFU_COMMIT:
       if (!s_active) return;
-      if (s_received == s_image_len) {
-        // M1 is transport-only: the image arrived intact but NO BLE touched the edge, so the
-        // edge is unchanged (its link stays up — it never entered DFU). Say so honestly.
-        // (M2: legacy VALIDATE_FIRMWARE + ACTIVATE_IMAGE_AND_RESET here → real reset into new app.)
-        char st[80];
-        snprintf(st, sizeof st, "M1 stub: %lu B transport-verified; edge NOT flashed (BLE client = M2)",
-                 (unsigned long)s_received);
-        sendStatus(st);
-        sendOp0(backhaul::DFU_DONE);
-      } else {
-        sendErr("size mismatch");
-      }
-      s_active = false;
-      setHeld(false);
+      if (s_received != s_image_len) { sendErr("size mismatch"); break; }
+      // All firmware is on the wire to the edge. Finish the legacy DFU (final RECEIVE response →
+      // VALIDATE → ACTIVATE); loop() emits DFU_DONE when bledfu reaches DONE. Stays active.
+      bledfu::commit();
       break;
-    }
 
     case backhaul::DFU_ABORT:
-      // (M2: tear down the BLE DFU link; the edge keeps its old app — dual-bank, not a brick.)
+      bledfu::abort("host aborted");   // tear down BLE + hand the radio back; edge keeps old app
       s_active = false;
       setHeld(false);
       break;
@@ -152,17 +145,21 @@ void loop() {
   bledfu::loop();
   if (bledfu::statusChanged()) sendStatus(bledfu::status());   // narrate edge state to the host
   switch (bledfu::state()) {
-    case bledfu::READY:
-      // M2a checkpoint: the central reached the edge bootloader and discovered the DFU service —
-      // but does NOT flash (that's M2b). Report + back off so the edge times out back to its app.
-      sendStatus("M2a: reached edge DFU service (0x1530) — NOT flashing (that is M2b)");
-      sendOp0(backhaul::DFU_DONE);
-      bledfu::abort("M2a checkpoint complete");
+    case bledfu::RECEIVING:
+      // Edge bootloader is primed (START + INIT done) — let the host start streaming the image.
+      if (!s_sent_ready) {
+        s_sent_ready = true;
+        uint8_t w[2] = { (uint8_t)(WINDOW & 0xFF), (uint8_t)(WINDOW >> 8) };
+        sendOp(backhaul::DFU_READY, w, 2);
+      }
+      break;
+    case bledfu::DONE:
+      sendOp0(backhaul::DFU_DONE);   // edge validated + rebooting into the new firmware
       s_active = false;
       setHeld(false);
       break;
     case bledfu::FAILED:
-      sendErr(bledfu::status());   // bledfu already handed the radio back; sendErr clears s_active/hold
+      sendErr(bledfu::status());     // bledfu already handed the radio back; sendErr clears s_active/hold
       break;
     default:
       break;
