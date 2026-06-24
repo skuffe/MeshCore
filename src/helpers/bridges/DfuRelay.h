@@ -24,4 +24,8 @@ void setHoldHandler(void (*fn)(bool));
 // frame (so the caller must NOT treat it as CLI text), false if it belongs to the text console.
 bool feedByte(uint8_t b);
 
+// Pump the async relay-flash state machine (BLE-DFU client progress, status narration). Call
+// every central loop(); cheap no-op when no flash is in progress.
+void loop();
+
 }  // namespace dfurelay

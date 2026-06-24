@@ -164,6 +164,7 @@ void loop() {
 
 #ifdef WITH_BACKHAUL_CENTRAL
   BleRelay.loop();
+  dfurelay::loop();   // pump an in-progress B-OTA relay flash (BLE-DFU client)
 #endif
 
 #ifdef WITH_NET_BRIDGE

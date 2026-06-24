@@ -53,7 +53,31 @@ void BleNusRelay::startBle() {
   Serial.println("BleRelay: scanning for NUS peripheral");
 }
 
+void BleNusRelay::suspendForDfu() {
+  // Hand the radio to BleDfuClient: stop hunting/holding the NUS link so the DFU client can
+  // own the single central slot. restartOnDisconnect(false) is the key bit — otherwise the
+  // scanner auto-resumes the moment the edge drops to its bootloader and grabs the radio back.
+  _suspended = true;
+  Bluefruit.Scanner.restartOnDisconnect(false);
+  Bluefruit.Scanner.stop();
+  // Deliberately do NOT force-disconnect: the caller just sent `start dfu` to the edge over this
+  // link; the edge reboots into its bootloader on its own (dropping the link cleanly). Cutting it
+  // here could lose the queued command. If the edge never drops, the DFU client times out (safe).
+}
+
+void BleNusRelay::resumeAfterDfu() {
+  // Take the radio back after the flash: restore our callbacks (the DFU client swapped them)
+  // and resume scanning for the peripheral's NUS.
+  _suspended = false;
+  Bluefruit.Central.setConnectCallback(onConnect);
+  Bluefruit.Central.setDisconnectCallback(onDisconnect);
+  Bluefruit.Scanner.setRxCallback(onScan);
+  Bluefruit.Scanner.restartOnDisconnect(true);
+  Bluefruit.Scanner.start(0);
+}
+
 void BleNusRelay::onScan(ble_gap_evt_adv_report_t* report) {
+  if (s_instance && s_instance->_suspended) return;   // radio handed to the DFU client
   // Match the configured node name (carried in the scan response). We don't
   // pre-filter by UUID (see startBle) — the NUS service is confirmed after
   // connecting, in onConnect via discover().
@@ -114,6 +138,8 @@ void BleNusRelay::loop() {
     startBle();
     _started = true;
   }
+
+  if (_suspended) return;   // a B-OTA flash owns the radio (BleDfuClient) — relay is dormant
 
 #ifdef WITH_NET_BRIDGE
   // Backhaul link dropped → flag the peripheral observer offline (retained), once; re-arm the

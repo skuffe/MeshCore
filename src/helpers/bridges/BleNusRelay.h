@@ -43,6 +43,13 @@ public:
   // arrives asynchronously and is printed to EthConsole (:5000). Used by `node <name> <cmd>`.
   void sendConsole(const char* cmd);
 
+  // B-OTA radio handoff: the central has ONE BLE central slot + one shared scanner. While a
+  // relay flash runs, the DFU client (BleDfuClient) owns the radio, so the NUS relay must let
+  // go — drop the link, stop scanning, and not auto-reconnect — then take it back afterwards.
+  void suspendForDfu();    // drop NUS + stop scan + disable auto-reconnect; relay goes dormant
+  void resumeAfterDfu();   // restore the relay's callbacks + resume scanning for the peripheral
+  bool suspended() const { return _suspended; }
+
   // Bind the node's NTP-synced RTC so the relay can push UTC to the peripheral over the backhaul
   // (FRAME_TIME), gated on the backhaul_timesync config toggle. Call once at boot.
   void setRtc(mesh::RTCClock* rtc) { _rtc = rtc; }
@@ -85,6 +92,7 @@ private:
   // node crashes before Serial even starts). Construct it after main() instead.
   BLEClientUart* _clientUart = nullptr;
   bool           _started = false;
+  bool           _suspended = false;   // true while a B-OTA flash owns the radio (see suspendForDfu)
   volatile bool  _linkUp = false;
   volatile uint16_t _conn_handle = BLE_CONN_HANDLE_INVALID;  // for RSSI readback
 };

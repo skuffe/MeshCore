@@ -1,7 +1,9 @@
 #include "DfuRelay.h"
 #ifdef WITH_BACKHAUL_CENTRAL
 #include <string.h>
+#include <stdio.h>
 #include "BackhaulFrame.h"
+#include "BleDfuClient.h"   // M2: the legacy BLE-DFU client this relay feeds
 
 // M1: host↔central FRAME_DFU transport with windowed flow control; the BLE-DFU client is a
 // stub (the `(M2: …)` comments mark where the real edge-side actions go). The state machine:
@@ -20,6 +22,7 @@ uint32_t         s_image_len = 0;   // total firmware bytes the host promised in
 uint32_t         s_received = 0;    // firmware bytes accepted so far
 uint16_t         s_next_seq = 0;    // next in-order DFU_DATA seq we expect
 uint16_t         s_since_progress = 0;
+char             s_target[25];      // edge node addressed by the active session
 
 const uint16_t WINDOW = 16;         // max DFU_DATA the host may keep in flight before an ACK
 
@@ -71,19 +74,19 @@ void handle(const uint8_t* p, uint16_t len) {
       s_received = 0;
       s_next_seq = 0;
       s_since_progress = 0;
+      memcpy(s_target, b.target, 24);
+      s_target[24] = 0;
       s_active = true;
       setHeld(true);   // own :5000 for the flash — no displacing client aborts it
-      // M1 stub: no BLE. (M2: resolve b.target in the observer table, `node <target> start dfu`,
-      //  scan for the edge bootloader, connect, discover DFU svc 0x1530, send legacy START + this
-      //  init packet — emitting a DFU_STATUS line at each step so the operator sees live state.)
       {
         char st[64];
-        snprintf(st, sizeof st, "M1 transport stub (no edge BLE): target %.20s, %lu B",
-                 b.target, (unsigned long)b.image_len);
+        snprintf(st, sizeof st, "B-OTA: %.20s, %lu B — entering edge DFU",
+                 s_target, (unsigned long)b.image_len);
         sendStatus(st);
       }
-      uint8_t w[2] = { (uint8_t)(WINDOW & 0xFF), (uint8_t)(WINDOW >> 8) };
-      sendOp(backhaul::DFU_READY, w, 2);
+      // Async: hand the radio to the BLE-DFU client. DFU_READY is sent later (in loop) once the
+      // edge bootloader is connected + discovered; M2a backs off there instead of flashing.
+      bledfu::start(s_target);
       break;
     }
 
@@ -143,6 +146,28 @@ void handle(const uint8_t* p, uint16_t len) {
 
 void begin(Stream* console) { s_con = console; }
 void setHoldHandler(void (*fn)(bool)) { s_hold = fn; }
+
+void loop() {
+  if (!s_active) return;
+  bledfu::loop();
+  if (bledfu::statusChanged()) sendStatus(bledfu::status());   // narrate edge state to the host
+  switch (bledfu::state()) {
+    case bledfu::READY:
+      // M2a checkpoint: the central reached the edge bootloader and discovered the DFU service —
+      // but does NOT flash (that's M2b). Report + back off so the edge times out back to its app.
+      sendStatus("M2a: reached edge DFU service (0x1530) — NOT flashing (that is M2b)");
+      sendOp0(backhaul::DFU_DONE);
+      bledfu::abort("M2a checkpoint complete");
+      s_active = false;
+      setHeld(false);
+      break;
+    case bledfu::FAILED:
+      sendErr(bledfu::status());   // bledfu already handed the radio back; sendErr clears s_active/hold
+      break;
+    default:
+      break;
+  }
+}
 
 bool feedByte(uint8_t b) {
   backhaul::Parser::Result r = s_parser.feed(b);
