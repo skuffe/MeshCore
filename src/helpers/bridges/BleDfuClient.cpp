@@ -235,7 +235,16 @@ void loop() {
       break;
     case B_CONNECT:
       if (s_connected_evt) { s_connected_evt = false;
-        if (discoverDfu()) { setStatus("connected to bootloader; starting legacy DFU"); setState(C_START); }
+        if (discoverDfu()) {
+          // Negotiate 2 Mbps PHY + DLE on the bootloader link for max streaming throughput.
+          // RAK3401 (nRF52833) supports BLE 5.0 PHY and DLE.
+          BLEConnection* conn = Bluefruit.Connection(s_conn);
+          if (conn) {
+            conn->requestPHY(BLE_GAP_PHY_2MBPS);
+            conn->requestDataLengthUpdate(NULL, NULL);
+          }
+          setStatus("connected to bootloader; starting legacy DFU"); setState(C_START);
+        }
         else abort("bootloader: 0x1530 DFU service not found");
       } else if (now - s_since > 6000) {
         // Connect didn't take — the bootloader may still be advertising. Retry a few times before

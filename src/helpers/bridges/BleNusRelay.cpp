@@ -23,9 +23,16 @@ void BleNusRelay::begin() {
 
 void BleNusRelay::startBle() {
   Serial.println("BleRelay: bringing up BLE central...");
+  // MAX central bandwidth for B-OTA throughput: MTU=247, event_len=6, hvn_qsize=3,
+  // wrcmd_qsize=4 (up from default 1 — allows 4 write_cmds in flight per conn event,
+  // so pktWrite() can pipeline chunks instead of busy-waiting per 20 B packet).
+  // Must precede begin(). PoE node → no power concern.
+  Bluefruit.configCentralConn(247, 6, 3, 4);
   Bluefruit.begin(1, 1);              // 1 peripheral (unused) + 1 central
   Bluefruit.setTxPower(BLE_TX_POWER);
   Bluefruit.setName("MeshCore-Relay");
+  // Fast connection interval (7.5–15 ms) — speeds B-OTA streaming; harmless for the NUS link.
+  Bluefruit.Central.setConnInterval(6, 12);
   Serial.println("BleRelay: Bluefruit up");
 
   // Generous RX FIFO (default is only 256 B). The notify callback drops bytes when the
@@ -102,7 +109,11 @@ void BleNusRelay::onConnect(uint16_t conn_handle) {
     s_instance->_clientUart->enableTXD();   // subscribe to NUS notifications
     s_instance->_conn_handle = conn_handle;
     BLEConnection* conn = Bluefruit.Connection(conn_handle);
-    if (conn) conn->monitorRssi();          // enable RSSI readback for `backhaul`
+    if (conn) {
+      conn->monitorRssi();                  // enable RSSI readback for `backhaul`
+      conn->requestPHY(BLE_GAP_PHY_2MBPS);  // 2 Mbps PHY — halves air time per packet
+      conn->requestDataLengthUpdate(NULL, NULL); // negotiate max DLE (longer PDU, less overhead)
+    }
     s_instance->_linkUp = true;
   } else {
     Bluefruit.disconnect(conn_handle);      // not the node we want
